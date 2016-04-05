@@ -882,7 +882,7 @@ static int dwc3_probe(struct platform_device *pdev)
 	spin_lock_init(&dwc->lock);
 	platform_set_drvdata(pdev, dwc);
 
-	if (!dev->dma_mask) {
+	if (!dev->dma_mask && dev->parent) {
 		dev->dma_mask = dev->parent->dma_mask;
 		dev->dma_parms = dev->parent->dma_parms;
 		dma_set_coherent_mask(dev, dev->parent->coherent_dma_mask);
@@ -901,6 +901,12 @@ static int dwc3_probe(struct platform_device *pdev)
 		goto err1;
 	}
 
+	/* Change burst beat and outstanding pipelined transfers requests */
+	dwc3_writel(dwc->regs, DWC3_GSBUSCFG0,
+		(dwc3_readl(dwc->regs, DWC3_GSBUSCFG0) & ~0xff) | 0xf);
+	dwc3_writel(dwc->regs, DWC3_GSBUSCFG1,
+		dwc3_readl(dwc->regs, DWC3_GSBUSCFG1) | 0xf00);
+
 	if (IS_ENABLED(CONFIG_USB_DWC3_HOST))
 		dwc->dr_mode = USB_DR_MODE_HOST;
 	else if (IS_ENABLED(CONFIG_USB_DWC3_GADGET))
@@ -914,6 +920,9 @@ static int dwc3_probe(struct platform_device *pdev)
 		dev_err(dev, "failed to initialize core\n");
 		goto err1;
 	}
+
+	dwc3_writel(dwc->regs, DWC3_GFLADJ, GFLADJ_30MHZ_REG_SEL |
+		    GFLADJ_30MHZ(0x20));
 
 	usb_phy_set_suspend(dwc->usb2_phy, 0);
 	usb_phy_set_suspend(dwc->usb3_phy, 0);

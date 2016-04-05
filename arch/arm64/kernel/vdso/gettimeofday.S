@@ -224,7 +224,17 @@ ENTRY(__do_get_tspec)
 
 	/* Read the virtual counter. */
 	isb
-	mrs	x15, cntvct_el0
+1:	mrs	x15, cntvct_el0
+#ifdef CONFIG_LS2085A_ERRATA_ERR008585
+	/*
+	 * ERR008585 workaround says to read register twice till
+	 * two conecutive read return same value
+	 * TODO: Add check for maximum number of read.
+	 */
+	mrs	x16, cntvct_el0
+	cmp	x16, x15
+	b.ne	1b
+#endif
 
 	/* Calculate cycle delta and convert to ns. */
 	sub	x10, x15, x10

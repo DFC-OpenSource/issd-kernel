@@ -70,6 +70,8 @@ static struct clock_event_device __percpu *arch_timer_evt;
 static bool arch_timer_use_virtual = true;
 static bool arch_timer_c3stop;
 static bool arch_timer_mem_use_virtual;
+static __always_inline u32 arch_timer_reg_read(int access,
+		enum arch_timer_reg reg, struct clock_event_device *clk);
 
 /*
  * Architected system timer support.
@@ -79,6 +81,9 @@ static __always_inline
 void arch_timer_reg_write(int access, enum arch_timer_reg reg, u32 val,
 			  struct clock_event_device *clk)
 {
+#ifdef CONFIG_LS2085A_ERRATA_TKT269926
+	u32 val_read;
+#endif
 	if (access == ARCH_TIMER_MEM_PHYS_ACCESS) {
 		struct arch_timer *timer = to_arch_timer(clk);
 		switch (reg) {
@@ -101,6 +106,13 @@ void arch_timer_reg_write(int access, enum arch_timer_reg reg, u32 val,
 		}
 	} else {
 		arch_timer_reg_write_cp15(access, reg, val);
+#ifdef CONFIG_LS2085A_ERRATA_TKT269926
+		val_read = arch_timer_reg_read_cp15(access, reg);
+		if ((val & 0xffffff00) != (val_read & 0xffffff00)) {
+			arch_timer_reg_write_cp15(access, reg, 0x00000000);
+			arch_timer_reg_write_cp15(access, reg, val);
+		}
+#endif
 	}
 }
 
@@ -110,6 +122,10 @@ u32 arch_timer_reg_read(int access, enum arch_timer_reg reg,
 {
 	u32 val;
 
+#ifdef CONFIG_LS2085A_ERRATA_ERR008585
+	u32 val_new, timeout = 200;
+#endif
+
 	if (access == ARCH_TIMER_MEM_PHYS_ACCESS) {
 		struct arch_timer *timer = to_arch_timer(clk);
 		switch (reg) {
@@ -118,6 +134,17 @@ u32 arch_timer_reg_read(int access, enum arch_timer_reg reg,
 			break;
 		case ARCH_TIMER_REG_TVAL:
 			val = readl_relaxed(timer->base + CNTP_TVAL);
+#ifdef CONFIG_LS2085A_ERRATA_ERR008585
+			val_new = readl_relaxed(timer->base + CNTP_TVAL);
+			while (val != val_new && timeout) {
+				val = readl_relaxed(timer->base + CNTP_TVAL);
+				val_new = readl_relaxed(timer->base +
+							CNTP_TVAL);
+				timeout--;
+
+			}
+			BUG_ON((timeout <= 0) && (val != val_new));
+#endif
 			break;
 		}
 	} else if (access == ARCH_TIMER_MEM_VIRT_ACCESS) {
@@ -128,6 +155,17 @@ u32 arch_timer_reg_read(int access, enum arch_timer_reg reg,
 			break;
 		case ARCH_TIMER_REG_TVAL:
 			val = readl_relaxed(timer->base + CNTV_TVAL);
+#ifdef CONFIG_LS2085A_ERRATA_ERR008585
+			val_new = readl_relaxed(timer->base + CNTV_TVAL);
+			while (val != val_new && timeout) {
+				val = readl_relaxed(timer->base + CNTV_TVAL);
+				val_new = readl_relaxed(timer->base +
+							CNTV_TVAL);
+				timeout--;
+			}
+			BUG_ON((timeout <= 0) && (val != val_new));
+#endif
+
 			break;
 		}
 	} else {

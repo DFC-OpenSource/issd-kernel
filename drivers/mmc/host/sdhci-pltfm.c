@@ -2,7 +2,7 @@
  * sdhci-pltfm.c Support for SDHCI platform devices
  * Copyright (c) 2009 Intel Corporation
  *
- * Copyright (c) 2007, 2011 Freescale Semiconductor, Inc.
+ * Copyright (c) 2007, 2011, 2015 Freescale Semiconductor, Inc.
  * Copyright (c) 2009 MontaVista Software, Inc.
  *
  * Authors: Xiaobo Xie <X.Xie@freescale.com>
@@ -92,8 +92,9 @@ void sdhci_get_of_property(struct platform_device *pdev)
 	if (of_get_property(np, "no-1-8-v", NULL))
 		host->quirks2 |= SDHCI_QUIRK2_NO_1_8_V;
 
-	if (of_device_is_compatible(np, "fsl,p2020-rev1-esdhc"))
-		host->quirks |= SDHCI_QUIRK_BROKEN_DMA;
+	if (of_device_is_compatible(np, "fsl,ls2085a-esdhc") ||
+		of_device_is_compatible(np, "fsl,ls2080a-esdhc"))
+		host->quirks &= ~SDHCI_QUIRK_BROKEN_CARD_DETECTION;
 
 	if (of_device_is_compatible(np, "fsl,p2020-esdhc") ||
 	    of_device_is_compatible(np, "fsl,p1010-esdhc") ||
@@ -121,6 +122,8 @@ struct sdhci_host *sdhci_pltfm_init(struct platform_device *pdev,
 				    size_t priv_size)
 {
 	struct sdhci_host *host;
+	struct device_node *np = pdev->dev.of_node;
+	struct sdhci_pltfm_host *pltfm_host;
 	struct resource *iomem;
 	int ret;
 
@@ -140,6 +143,14 @@ struct sdhci_host *sdhci_pltfm_init(struct platform_device *pdev,
 		ret = PTR_ERR(host);
 		goto err;
 	}
+
+	pltfm_host = sdhci_priv(host);
+	pltfm_host->endian_mode = BIG_ENDIAN_MODE;
+
+#ifdef CONFIG_OF
+	if (of_get_property(np, "little-endian", NULL))
+		pltfm_host->endian_mode = LITTLE_ENDIAN_MODE;
+#endif /* CONFIG_OF */
 
 	host->hw_name = dev_name(&pdev->dev);
 	if (pdata && pdata->ops)
@@ -224,7 +235,7 @@ int sdhci_pltfm_unregister(struct platform_device *pdev)
 {
 	struct sdhci_host *host = platform_get_drvdata(pdev);
 	struct sdhci_pltfm_host *pltfm_host = sdhci_priv(host);
-	int dead = (readl(host->ioaddr + SDHCI_INT_STATUS) == 0xffffffff);
+	int dead = (sdhci_readl(host, SDHCI_INT_STATUS) == 0xffffffff);
 
 	sdhci_remove_host(host, dead);
 	clk_disable_unprepare(pltfm_host->clk);

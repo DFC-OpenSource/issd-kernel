@@ -52,6 +52,9 @@ static int ahci_probe(struct platform_device *pdev)
 	if (of_device_is_compatible(dev->of_node, "hisilicon,hisi-ahci"))
 		hpriv->flags |= AHCI_HFLAG_NO_FBS | AHCI_HFLAG_NO_NCQ;
 
+	if (of_device_is_compatible(dev->of_node, "fsl,ls1021a-ahci"))
+		hpriv->flags |= AHCI_HFLAG_NO_NCQ;
+
 	rc = ahci_platform_init_host(pdev, hpriv, &ahci_port_info,
 				     &ahci_platform_sht);
 	if (rc)
@@ -69,6 +72,7 @@ static SIMPLE_DEV_PM_OPS(ahci_pm_ops, ahci_platform_suspend,
 static const struct of_device_id ahci_of_match[] = {
 	{ .compatible = "generic-ahci", },
 	/* Keep the following compatibles for device tree compatibility */
+	{ .compatible = "fsl,ls1021a-ahci", },
 	{ .compatible = "snps,spear-ahci", },
 	{ .compatible = "snps,exynos5440-ahci", },
 	{ .compatible = "ibm,476gtr-ahci", },

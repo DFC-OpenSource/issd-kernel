@@ -62,6 +62,9 @@ static __always_inline
 u32 arch_timer_reg_read_cp15(int access, enum arch_timer_reg reg)
 {
 	u32 val;
+#ifdef CONFIG_LS2085A_ERRATA_ERR008585
+	u64 val_new, timeout = 200;
+#endif
 
 	if (access == ARCH_TIMER_PHYS_ACCESS) {
 		switch (reg) {
@@ -70,6 +73,17 @@ u32 arch_timer_reg_read_cp15(int access, enum arch_timer_reg reg)
 			break;
 		case ARCH_TIMER_REG_TVAL:
 			asm volatile("mrs %0, cntp_tval_el0" : "=r" (val));
+#ifdef CONFIG_LS2085A_ERRATA_ERR008585
+			asm volatile("mrs %0, cntp_tval_el0" : "=r" (val_new));
+			while (val != val_new && timeout) {
+				asm volatile("mrs %0, cntp_tval_el0" \
+					     : "=r" (val));
+				asm volatile("mrs %0, cntp_tval_el0" \
+					     : "=r" (val_new));
+				timeout--;
+			}
+			BUG_ON((timeout <= 0) && (val != val_new));
+#endif
 			break;
 		}
 	} else if (access == ARCH_TIMER_VIRT_ACCESS) {
@@ -79,6 +93,17 @@ u32 arch_timer_reg_read_cp15(int access, enum arch_timer_reg reg)
 			break;
 		case ARCH_TIMER_REG_TVAL:
 			asm volatile("mrs %0, cntv_tval_el0" : "=r" (val));
+#ifdef CONFIG_LS2085A_ERRATA_ERR008585
+			asm volatile("mrs %0, cntv_tval_el0" : "=r" (val_new));
+			while (val != val_new && timeout) {
+				asm volatile("mrs %0, cntv_tval_el0" \
+					     : "=r" (val));
+				asm volatile("mrs %0, cntv_tval_el0" \
+					     : "=r" (val_new));
+				timeout--;
+			}
+			BUG_ON((timeout <= 0) && (val != val_new));
+#endif
 			break;
 		}
 	}
@@ -113,13 +138,26 @@ static inline u64 arch_counter_get_cntpct(void)
 	BUG();
 	return 0;
 }
-
 static inline u64 arch_counter_get_cntvct(void)
 {
 	u64 cval;
 
+#ifdef CONFIG_LS2085A_ERRATA_ERR008585
+	u64 tmp, timeout = 200;
+#endif
+
 	isb();
 	asm volatile("mrs %0, cntvct_el0" : "=r" (cval));
+
+#ifdef CONFIG_LS2085A_ERRATA_ERR008585
+	asm volatile("mrs %0, cntvct_el0" : "=r" (tmp));
+	while (cval != tmp && timeout) {
+		asm volatile("mrs %0, cntvct_el0" : "=r" (cval));
+		asm volatile("mrs %0, cntvct_el0" : "=r" (tmp));
+		timeout--;
+	}
+	BUG_ON((timeout <= 0) && (cval != tmp));
+#endif
 
 	return cval;
 }

@@ -40,7 +40,12 @@ static int cmux_set_parent(struct clk_hw *hw, u8 idx)
 	if (clk->flags & CLKSEL_ADJUST)
 		clksel += 8;
 	clksel = (clksel & 0xf) << CLKSEL_SHIFT;
+#ifdef CONFIG_ARCH_LAYERSCAPE
+	/* FIXME: Make this better */
+	iowrite32(clksel, clk->reg);
+#else
 	iowrite32be(clksel, clk->reg);
+#endif
 
 	return 0;
 }
@@ -50,7 +55,12 @@ static u8 cmux_get_parent(struct clk_hw *hw)
 	struct cmux_clk *clk = to_cmux_clk(hw);
 	u32 clksel;
 
+#ifdef CONFIG_ARCH_LAYERSCAPE
+	/* FIXME: Make this better */
+	clksel = ioread32(clk->reg);
+#else
 	clksel = ioread32be(clk->reg);
+#endif
 	clksel = (clksel >> CLKSEL_SHIFT) & 0xf;
 	if (clk->flags & CLKSEL_ADJUST)
 		clksel -= 8;
@@ -171,14 +181,25 @@ static void __init core_pll_init(struct device_node *np)
 	}
 
 	/* get the multiple of PLL */
+#ifdef CONFIG_ARCH_LAYERSCAPE
+	/* FIXME: Make this better */
+	mult = ioread32(base);
+	/* check if this PLL is disabled */
+	if (mult & PLL_KILL) {
+		pr_debug("PLL:%s is disabled\n", np->name);
+		goto err_map;
+	}
+	mult = (mult >> 1) & 0xff;
+#else
 	mult = ioread32be(base);
-
 	/* check if this PLL is disabled */
 	if (mult & PLL_KILL) {
 		pr_debug("PLL:%s is disabled\n", np->name);
 		goto err_map;
 	}
 	mult = (mult >> 1) & 0x3f;
+
+#endif
 
 	parent_name = of_clk_get_parent_name(np, 0);
 	if (!parent_name) {
@@ -354,9 +375,12 @@ return_clk_unregister:
 
 CLK_OF_DECLARE(qoriq_sysclk_1, "fsl,qoriq-sysclk-1.0", sysclk_init);
 CLK_OF_DECLARE(qoriq_sysclk_2, "fsl,qoriq-sysclk-2.0", sysclk_init);
+CLK_OF_DECLARE(qoriq_sysclk_3, "fsl,qoriq-sysclk-3.0", sysclk_init);
 CLK_OF_DECLARE(qoriq_core_pll_1, "fsl,qoriq-core-pll-1.0", core_pll_init);
 CLK_OF_DECLARE(qoriq_core_pll_2, "fsl,qoriq-core-pll-2.0", core_pll_init);
+CLK_OF_DECLARE(qoriq_core_pll_3, "fsl,qoriq-core-pll-3.0", core_pll_init);
 CLK_OF_DECLARE(qoriq_core_mux_1, "fsl,qoriq-core-mux-1.0", core_mux_init);
 CLK_OF_DECLARE(qoriq_core_mux_2, "fsl,qoriq-core-mux-2.0", core_mux_init);
+CLK_OF_DECLARE(qoriq_core_mux_3, "fsl,qoriq-core-mux-3.0", core_mux_init);
 CLK_OF_DECLARE(qoriq_pltfrm_pll_1, "fsl,qoriq-platform-pll-1.0", pltfrm_pll_init);
 CLK_OF_DECLARE(qoriq_pltfrm_pll_2, "fsl,qoriq-platform-pll-2.0", pltfrm_pll_init);

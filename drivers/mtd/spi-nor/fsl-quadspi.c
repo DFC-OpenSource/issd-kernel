@@ -29,6 +29,9 @@
 
 /* The registers */
 #define QUADSPI_MCR			0x00
+#define MX6SX_QUADSPI_MCR_TX_DDR_DELAY_EN_SHIFT	29
+#define MX6SX_QUADSPI_MCR_TX_DDR_DELAY_EN_MASK	\
+				(1 << MX6SX_QUADSPI_MCR_TX_DDR_DELAY_EN_SHIFT)
 #define QUADSPI_MCR_RESERVED_SHIFT	16
 #define QUADSPI_MCR_RESERVED_MASK	(0xF << QUADSPI_MCR_RESERVED_SHIFT)
 #define QUADSPI_MCR_MDIS_SHIFT		14
@@ -286,8 +289,10 @@ static void fsl_qspi_init_lut(struct fsl_qspi *q)
 {
 	void __iomem *base = q->iobase;
 	int rxfifo = q->devtype_data->rxfifo;
+	struct spi_nor *nor = &q->nor[0];
+	u8 addrlen = (nor->addr_width == 3) ? ADDR24BIT : ADDR32BIT;
 	u32 lut_base;
-	u8 cmd, addrlen, dummy;
+	u8 op, dm;
 	int i;
 
 	fsl_qspi_unlock_lut(q);
@@ -296,24 +301,52 @@ static void fsl_qspi_init_lut(struct fsl_qspi *q)
 	for (i = 0; i < QUADSPI_LUT_NUM; i++)
 		writel(0, base + QUADSPI_LUT_BASE + i * 4);
 
-	/* Quad Read */
+	/* Quad Read and DDR Quad Read*/
 	lut_base = SEQID_QUAD_READ * 4;
+	op = nor->read_opcode;
+	dm = nor->read_dummy;
+	if (nor->flash_read == SPI_NOR_QUAD) {
+		if (op == SPINOR_OP_READ_1_1_4 || op == SPINOR_OP_READ4_1_1_4) {
+			/* read mode : 1-1-4 */
+			writel(LUT0(CMD, PAD1, op) | LUT1(ADDR, PAD1, addrlen),
+				base + QUADSPI_LUT(lut_base));
 
-	if (q->nor_size <= SZ_16M) {
-		cmd = SPINOR_OP_READ_1_1_4;
-		addrlen = ADDR24BIT;
-		dummy = 8;
-	} else {
-		/* use the 4-byte address */
-		cmd = SPINOR_OP_READ_1_1_4;
-		addrlen = ADDR32BIT;
-		dummy = 8;
+			writel(LUT0(DUMMY, PAD1, dm) | LUT1(READ, PAD4, rxfifo),
+				base + QUADSPI_LUT(lut_base + 1));
+		} else {
+			dev_err(nor->dev, "Unsupported opcode : 0x%.2x\n", op);
+		}
+	} else if (nor->flash_read == SPI_NOR_DDR_QUAD) {
+		if (op == SPINOR_OP_READ_1_4_4_D ||
+			 op == SPINOR_OP_READ4_1_4_4_D) {
+			/* read mode : 1-4-4, such as Spansion s25fl128s. */
+			writel(LUT0(CMD, PAD1, op)
+				| LUT1(ADDR_DDR, PAD4, addrlen),
+				base + QUADSPI_LUT(lut_base));
+
+			writel(LUT0(MODE_DDR, PAD4, 0xff)
+				| LUT1(DUMMY, PAD1, dm),
+				base + QUADSPI_LUT(lut_base + 1));
+
+			writel(LUT0(READ_DDR, PAD4, rxfifo)
+				| LUT1(JMP_ON_CS, PAD1, 0),
+				base + QUADSPI_LUT(lut_base + 2));
+		} else if (op == SPINOR_OP_READ_1_1_4_D) {
+			/* read mode : 1-1-4, such as Micron N25Q256A. */
+			writel(LUT0(CMD, PAD1, op)
+				| LUT1(ADDR_DDR, PAD1, addrlen),
+				base + QUADSPI_LUT(lut_base));
+
+			writel(LUT0(DUMMY, PAD1, dm)
+				| LUT1(READ_DDR, PAD4, rxfifo),
+				base + QUADSPI_LUT(lut_base + 1));
+
+			writel(LUT0(JMP_ON_CS, PAD1, 0),
+				base + QUADSPI_LUT(lut_base + 2));
+		} else {
+			dev_err(nor->dev, "Unsupported opcode : 0x%.2x\n", op);
+		}
 	}
-
-	writel(LUT0(CMD, PAD1, cmd) | LUT1(ADDR, PAD1, addrlen),
-			base + QUADSPI_LUT(lut_base));
-	writel(LUT0(DUMMY, PAD1, dummy) | LUT1(READ, PAD4, rxfifo),
-			base + QUADSPI_LUT(lut_base + 1));
 
 	/* Write enable */
 	lut_base = SEQID_WREN * 4;
@@ -321,17 +354,7 @@ static void fsl_qspi_init_lut(struct fsl_qspi *q)
 
 	/* Page Program */
 	lut_base = SEQID_PP * 4;
-
-	if (q->nor_size <= SZ_16M) {
-		cmd = SPINOR_OP_PP;
-		addrlen = ADDR24BIT;
-	} else {
-		/* use the 4-byte address */
-		cmd = SPINOR_OP_PP;
-		addrlen = ADDR32BIT;
-	}
-
-	writel(LUT0(CMD, PAD1, cmd) | LUT1(ADDR, PAD1, addrlen),
+	writel(LUT0(CMD, PAD1, nor->program_opcode) | LUT1(ADDR, PAD1, addrlen),
 			base + QUADSPI_LUT(lut_base));
 	writel(LUT0(WRITE, PAD1, 0), base + QUADSPI_LUT(lut_base + 1));
 
@@ -342,17 +365,7 @@ static void fsl_qspi_init_lut(struct fsl_qspi *q)
 
 	/* Erase a sector */
 	lut_base = SEQID_SE * 4;
-
-	if (q->nor_size <= SZ_16M) {
-		cmd = SPINOR_OP_SE;
-		addrlen = ADDR24BIT;
-	} else {
-		/* use the 4-byte address */
-		cmd = SPINOR_OP_SE;
-		addrlen = ADDR32BIT;
-	}
-
-	writel(LUT0(CMD, PAD1, cmd) | LUT1(ADDR, PAD1, addrlen),
+	writel(LUT0(CMD, PAD1, nor->erase_opcode) | LUT1(ADDR, PAD1, addrlen),
 			base + QUADSPI_LUT(lut_base));
 
 	/* Erase the whole chip */
@@ -394,6 +407,10 @@ static void fsl_qspi_init_lut(struct fsl_qspi *q)
 static int fsl_qspi_get_seqid(struct fsl_qspi *q, u8 cmd)
 {
 	switch (cmd) {
+	case SPINOR_OP_READ_1_1_4_D:
+	case SPINOR_OP_READ_1_4_4_D:
+	case SPINOR_OP_READ4_1_4_4_D:
+	case SPINOR_OP_READ4_1_1_4:
 	case SPINOR_OP_READ_1_1_4:
 		return SEQID_QUAD_READ;
 	case SPINOR_OP_WREN:
@@ -402,6 +419,7 @@ static int fsl_qspi_get_seqid(struct fsl_qspi *q, u8 cmd)
 		return SEQID_WRDI;
 	case SPINOR_OP_RDSR:
 		return SEQID_RDSR;
+	case SPINOR_OP_BE_4K:
 	case SPINOR_OP_SE:
 		return SEQID_SE;
 	case SPINOR_OP_CHIP_ERASE:
@@ -582,6 +600,8 @@ static void fsl_qspi_set_map_addr(struct fsl_qspi *q)
 static void fsl_qspi_init_abh_read(struct fsl_qspi *q)
 {
 	void __iomem *base = q->iobase;
+	struct spi_nor *nor = &q->nor[0];
+	u32 reg, reg2;
 	int seqid;
 
 	/* AHB configuration for access buffer 0/1/2 .*/
@@ -601,9 +621,30 @@ static void fsl_qspi_init_abh_read(struct fsl_qspi *q)
 	writel(0, base + QUADSPI_BUF2IND);
 
 	/* Set the default lut sequence for AHB Read. */
-	seqid = fsl_qspi_get_seqid(q, q->nor[0].read_opcode);
+	seqid = fsl_qspi_get_seqid(q, nor->read_opcode);
 	writel(seqid << QUADSPI_BFGENCR_SEQID_SHIFT,
 		q->iobase + QUADSPI_BFGENCR);
+
+	/* enable the DDR quad read */
+	if (nor->flash_read == SPI_NOR_DDR_QUAD) {
+		reg = readl(q->iobase + QUADSPI_MCR);
+
+		/* Firstly, disable the module */
+		writel(reg | QUADSPI_MCR_MDIS_MASK, q->iobase + QUADSPI_MCR);
+
+		/* Set the Sampling Register for DDR */
+		reg2 = readl(q->iobase + QUADSPI_SMPR);
+		reg2 &= ~QUADSPI_SMPR_DDRSMP_MASK;
+		reg2 |= (2 << QUADSPI_SMPR_DDRSMP_SHIFT);
+		writel(reg2, q->iobase + QUADSPI_SMPR);
+
+		/* Enable the module again (enable the DDR too) */
+		reg |= QUADSPI_MCR_DDR_EN_MASK;
+		if (is_imx6sx_qspi(q))
+			reg |= MX6SX_QUADSPI_MCR_TX_DDR_DELAY_EN_MASK;
+
+		writel(reg, q->iobase + QUADSPI_MCR);
+	}
 }
 
 /* We use this function to do some basic init for spi_nor_scan(). */
@@ -867,6 +908,8 @@ static int fsl_qspi_probe(struct platform_device *pdev)
 	/* iterate the subnodes. */
 	for_each_available_child_of_node(dev->of_node, np) {
 		char modalias[40];
+		enum read_mode mode = SPI_NOR_QUAD;
+		u32 dummy = 0;
 
 		/* skip the holes */
 		if (!q->has_second_chip)
@@ -877,6 +920,7 @@ static int fsl_qspi_probe(struct platform_device *pdev)
 
 		nor->mtd = mtd;
 		nor->dev = dev;
+		nor->np = np;
 		nor->priv = q;
 		mtd->priv = nor;
 
@@ -894,6 +938,12 @@ static int fsl_qspi_probe(struct platform_device *pdev)
 		if (ret < 0)
 			goto irq_failed;
 
+		/* Can we enable the DDR Quad Read? */
+		ret = of_property_read_u32(np, "spi-nor,ddr-quad-read-dummy",
+					&dummy);
+		if (!ret && dummy > 0)
+			mode = SPI_NOR_DDR_QUAD;
+
 		ret = of_property_read_u32(np, "spi-max-frequency",
 				&q->clk_rate);
 		if (ret < 0)
@@ -902,7 +952,7 @@ static int fsl_qspi_probe(struct platform_device *pdev)
 		/* set the chip address for READID */
 		fsl_qspi_set_base_addr(q, nor);
 
-		ret = spi_nor_scan(nor, modalias, SPI_NOR_QUAD);
+		ret = spi_nor_scan(nor, modalias, mode);
 		if (ret)
 			goto irq_failed;
 
