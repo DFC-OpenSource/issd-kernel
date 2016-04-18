@@ -1,4 +1,5 @@
-/* Driver for Realtek RTS51xx USB card reader
+/*
+ * Driver for Realtek RTS51xx USB card reader
  *
  * Copyright(c) 2009 Realtek Semiconductor Corp. All rights reserved.
  *
@@ -264,8 +265,10 @@ static int rts51x_bulk_transport(struct us_data *us, u8 lun,
 	if (bcs->Tag != us->tag)
 		return USB_STOR_TRANSPORT_ERROR;
 
-	/* try to compute the actual residue, based on how much data
-	 * was really transferred and what the device tells us */
+	/*
+	 * try to compute the actual residue, based on how much data
+	 * was really transferred and what the device tells us
+	 */
 	if (residue)
 		residue = residue < buf_len ? residue : buf_len;
 
@@ -283,7 +286,8 @@ static int rts51x_bulk_transport(struct us_data *us, u8 lun,
 		return USB_STOR_TRANSPORT_FAILED;
 
 	case US_BULK_STAT_PHASE:
-		/* phase error -- note that a transport reset will be
+		/*
+		 * phase error -- note that a transport reset will be
 		 * invoked by the invoke_transport() function
 		 */
 		return USB_STOR_TRANSPORT_ERROR;
