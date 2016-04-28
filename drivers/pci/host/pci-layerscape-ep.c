@@ -131,8 +131,8 @@ void ls_pcie_ep_dev_setup_bar(struct ls_ep_dev *ep, int bar, u32 size)
 	else
 		bar_base = pcie->dbi + PCIE_NO_SRIOV_BAR_BASE;
 
-	ls_pcie_ep_dev_cfg_enable(ep);
-	ls_pcie_ep_setup_bar(bar_base, bar, size);
+	//ls_pcie_ep_dev_cfg_enable(ep);
+	//ls_pcie_ep_setup_bar(bar_base, bar, size); /*iSSD change; here the BARs are again getting reconfigured*/
 }
 
 static int ls_pcie_ep_dev_init(struct ls_pcie *pcie, int pf_idx, int vf_idx)

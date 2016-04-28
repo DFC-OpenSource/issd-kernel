@@ -349,8 +349,9 @@ static int ls_pcie_ep_init_test(struct ls_ep_dev *ep, u64 bus_addr)
 
 	test->bus_addr = bus_addr;
 
-	ls_pcie_ep_dev_cfg_enable(ep);
-	ls_pcie_ep_test_setup_bars(ep);
+//	ls_pcie_ep_dev_cfg_enable(ep);
+#if 0
+	ls_pcie_ep_test_setup_bars(ep); /*iSSD change; here the BARs are again getting reconfigured*/
 	/* outbound iATU*/
 	ls_pcie_iatu_outbound_set(pcie, 0, PCIE_ATU_TYPE_MEM,
 				  test->out_addr, bus_addr, PCIE_BAR4_SIZE);
@@ -361,7 +362,7 @@ static int ls_pcie_ep_init_test(struct ls_ep_dev *ep, u64 bus_addr)
 	ls_pcie_iatu_inbound_set(pcie, 2, 2, test->cfg_addr);
 	/* ATU 3 : INBOUND : map BAR4 */
 	ls_pcie_iatu_inbound_set(pcie, 3, 4, test->buf_addr);
-
+#endif
 	return 0;
 
 _err:
