@@ -646,8 +646,8 @@ static int ls_pcie_ep_dev_dbgfs_init(struct ls_ep_dev *ep)
 	struct ls_pcie *pcie = ep->pcie;
 	struct dentry *pfile;
 
-	ls_pcie_ep_dev_cfg_enable(ep);
-	ls_pcie_ep_test_setup_bars(ep);
+//	ls_pcie_ep_dev_cfg_enable(ep);
+//	ls_pcie_ep_test_setup_bars(ep);
 
 	ep->dir = debugfs_create_dir(dev_name(&ep->dev), pcie->dir);
 	if (!ep->dir)
