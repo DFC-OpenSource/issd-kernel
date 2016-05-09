@@ -92,7 +92,7 @@ void ls_pcie_ep_dev_cfg_enable(struct ls_ep_dev *ep)
 {
 	ls_pcie_try_cfg2(ep->pcie, ep->pf_idx, ep->vf_idx);
 }
-
+#if 0
 void ls_pcie_ep_setup_bar(void *bar_base, int bar, u32 size)
 {
 	if (size < 4 * 1024)
@@ -117,7 +117,7 @@ void ls_pcie_ep_setup_bar(void *bar_base, int bar, u32 size)
 		break;
 	}
 }
-
+#endif
 void ls_pcie_ep_dev_setup_bar(struct ls_ep_dev *ep, int bar, u32 size)
 {
 	struct ls_pcie *pcie = ep->pcie;
