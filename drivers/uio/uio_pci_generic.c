@@ -134,7 +134,7 @@ static int inbound_config(int bar_no, uint64_t bar_address)
 	iounmap(reg_vir);
 	return 0;
 }
-#if 0
+
 static int outbound_config(void)
 {
 	void __iomem *reg_vir;
@@ -144,21 +144,28 @@ static int outbound_config(void)
 		return -1;
 	}
 
-	writel(1, reg_vir + DBI_REG);
-	writel(0x00000002, reg_vir + INDEX_REG);
+    writel(0x00000000, reg_vir + INDEX_REG);
 	writel(0xffffffff, reg_vir + ADD_RANGE_REG);
 	writel(0x00000000, reg_vir + TARGET_ADD_LOW);
-	writel(0x00000000, reg_vir + TARGET_ADD_HIGH);
-	writel(0x00000000, reg_vir + BASE_ADD_LOW);
-	writel(0x14, reg_vir + BASE_ADD_HIGH);
-	writel(0, reg_vir + CONTROL1_REG);
-	writel(0x80000000, reg_vir + CONTROL2_REG);
-	writel(0, reg_vir + DBI_REG);
+    writel(0x00000000, reg_vir + TARGET_ADD_HIGH);
+    writel(0x00000000, reg_vir + BASE_ADD_LOW);
+    writel(0x14, reg_vir + BASE_ADD_HIGH);
+    writel(0, reg_vir + CONTROL1_REG);
+    writel(0x80000000, reg_vir + CONTROL2_REG);
 
-	iounmap(reg_vir);
+    writel(0x00000001, reg_vir + INDEX_REG);
+    writel(0xffffffff, reg_vir + ADD_RANGE_REG);
+    writel(0x00000000, reg_vir + TARGET_ADD_LOW);
+    writel(0x00000001, reg_vir + TARGET_ADD_HIGH);
+    writel(0x00000000, reg_vir + BASE_ADD_LOW);
+    writel(0x15, reg_vir + BASE_ADD_HIGH);
+    writel(0, reg_vir + CONTROL1_REG);
+    writel(0x80000000, reg_vir + CONTROL2_REG);
+
+    iounmap(reg_vir);
 	return 0;
 }
-#endif
+
 static int gc_phy_addr(void)
 {
 	static int ret, i;
@@ -211,11 +218,9 @@ static int end_point_configuration(uint64_t bar0)
 	if ((ret = inbound_config(BAR0, bar0)) < 0) {
 		return ret;
 	}
-#if 0
-	if ((ret = outbound_config()) < 0) {
+    if ((ret = outbound_config()) < 0) {
 		return ret;
 	}
-#endif
 	return ret;
 }
 
