@@ -75,23 +75,79 @@
 
                partition@3C0000 {
                        label = "UIMAGE_INIC";
-			reg = <0x3C0000 0x880000>;
+			           reg = <0x3C0000 0x880000>;
                };
 
                partition@C40000 {
                        label = "UIMAGE_ISSD";
-			reg = <0xC40000 0x880000>;
+			           reg = <0xC40000 0x880000>;
                };
 
                partition@14C0000 {
                        label = "ROOTFS";
-			reg = <0x14C0000 0x2140000>;
+			           reg = <0x14C0000 0x2140000>;
                };
 
                partition@3600000 {
                        label = "JFFS2";
-			reg = <0x3600000 0xA00000>;
+			           reg = <0x3600000 0xA00000>;
                };
+
+	           partition@4000000 {
+                       label = "PBL_1";
+                       reg = <0x4000000 0x20000>;
+               };
+
+               partition@4020000 {
+                       label = "U-BOOT_1";
+                       reg = <0x4020000 0xA0000>;
+               };
+
+               partition@40C0000 {
+                       label = "U-BOOT_ENV_1";
+                       reg = <0x40C0000 0x20000>;
+               };
+
+               partition@40E0000 {
+                       label = "DPL_1";
+                       reg = <0x40E0000 0x20000>;
+               };
+
+               partition@4100000 {
+                       label = "DPC_1";
+                       reg = <0x4100000 0x20000>;
+               };
+
+               partition@4120000 {
+                       label = "MC_1";
+                       reg = <0x4120000 0x280000>;
+               };
+
+               partition@43A0000 {
+                       label = "DTB_1";
+                       reg = <0x43A0000 0x20000>;
+               };
+
+               partition@43C0000 {
+                       label = "UIMAGE_INIC_1";
+			           reg = <0x43C0000 0x880000>;
+               };
+
+               partition@4C40000 {
+                       label = "UIMAGE_ISSD_1";
+			           reg = <0x4C40000 0x880000>;
+               };
+
+               partition@54C0000 {
+                       label = "ROOTFS_1";
+			           reg = <0x54C0000 0x2140000>;
+               };
+
+               partition@7600000 {
+                       label = "JFFS2_1";
+			           reg = <0x7600000 0xA00000>;
+               };
+
 	};
 
 	nand@2,0 {

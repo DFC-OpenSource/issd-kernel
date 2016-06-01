@@ -31,7 +31,7 @@
 
 #ifndef __DPAA2_ETH_H
 #define __DPAA2_ETH_H
-
+#include <inic_config.h>
 #include <linux/netdevice.h>
 #include <linux/if_vlan.h>
 #include "../../fsl-mc/include/fsl_dpaa2_io.h"
@@ -72,13 +72,27 @@
  * to accommodate the buffer refill delay.
  */
 #define DPAA2_ETH_MAX_FRAMES_PER_QUEUE	(DPAA2_ETH_TAILDROP_THRESH / 64)
+#if FSLU_NVME_INIC
+#if FSLU_NVME_INIC_DPAA2
+#define DPAA2_ETH_NUM_BUFS		(300 * 7 * 8)
+#endif
+#if FSLU_NVME_INIC_QDMA
 #define DPAA2_ETH_NUM_BUFS		(DPAA2_ETH_MAX_FRAMES_PER_QUEUE + 256)
+#define DPAA2_ETH_NUM_TX_BUFS		(300 * 7 * 8)
+#endif
+#define DPAA2_ETH_RX_BUFFER_SIZE	9216
+
+#else
+#define DPAA2_ETH_RX_BUFFER_SIZE	2048
+#define DPAA2_ETH_NUM_BUFS		(DPAA2_ETH_MAX_FRAMES_PER_QUEUE + 256)
+#endif
+
 #define DPAA2_ETH_REFILL_THRESH		DPAA2_ETH_MAX_FRAMES_PER_QUEUE
 
 /* Hardware requires alignment for ingress/egress buffer addresses
  * and ingress buffer lengths.
  */
-#define DPAA2_ETH_RX_BUFFER_SIZE	2048
+
 #define DPAA2_ETH_TX_BUF_ALIGN		64
 #define DPAA2_ETH_RX_BUF_ALIGN		256
 #define DPAA2_ETH_NEEDED_HEADROOM(p_priv) \
@@ -222,6 +236,52 @@ struct dpaa2_eth_ch_stats {
 
 #define DPAA2_ETH_MAX_DPCONS		NR_CPUS
 
+#if FSLU_NVME_INIC
+struct circ_buf_desc {
+    __le32 len_offset_flag;
+    __le32 addr_lower;
+    __le32 addr_higher;
+    __le32 fd_err_frc;
+};
+#if FSLU_NVME_INIC_QDMA
+struct tx_buf_desc {
+uint64_t addr;
+uint64_t flag;
+};
+#endif
+
+struct buf_pool_desc {
+    __le32 pool_set;
+    __le32 pool_addr;
+    __le32 pool_len;
+    __le32 pool_refill;
+    __le32 napi_msi;
+    __le32 tx_data_offset;
+    __le32 tx_irq;
+    __le32 conf_irq;
+    int8_t iface_status;
+    int8_t mac_id[7];
+    __le32 rx_desc_base;
+    __le32 tx_desc_base;
+    __le16 bpid;
+    __le16 obj_id;
+#if FSLU_NVME_INIC_DPAA2
+    __le16 pull_rx_buffers;
+#endif
+};
+
+struct refill_mem_pool {
+    __le32 pool_addr;
+    __le32 pool_flag;
+};
+struct x86mem_flags{
+__le32 tx_irq_flag;
+__le32 link_state_update;
+__le32 link_state;
+__le32 padding;
+};
+#endif
+
 enum dpaa2_eth_fq_type {
 	DPAA2_RX_FQ = 0,
 	DPAA2_TX_CONF_FQ,
@@ -321,6 +381,67 @@ struct dpaa2_eth_priv {
 
 	bool ts_tx_en; /* Tx timestamping enabled */
 	bool ts_rx_en; /* Rx timestamping enabled */
+#if FSLU_NVME_INIC
+	spinlock_t tx_desc_lock;
+	spinlock_t tx_share_lock;
+	spinlock_t rx_desc_lock;
+#if FSLU_NVME_INIC_QDMA
+	spinlock_t rx_dma_lock;
+#endif
+	spinlock_t tx_conf_lock;
+	struct circ_buf_desc *rx_base;
+	struct circ_buf_desc *tx_base;
+	struct circ_buf_desc *conf_base;
+	struct circ_buf_desc *cur_rx;
+	struct circ_buf_desc *cur_tx;
+#if FSLU_NVME_INIC_DPAA2
+	struct circ_buf_desc *cur_conf;
+#endif
+#if FSLU_NVME_INIC_QDMA
+struct circ_buf_desc *cur_tx_dma;
+#endif
+	struct circ_buf_desc *dirty_tx;
+	struct buf_pool_desc *bman_buf;
+	struct refill_mem_pool *mem_pool_base;
+	struct refill_mem_pool *mem_pool_cur;
+	struct x86mem_flags  *flags_ptr;
+	int tx_free;
+	int rx_free;
+	int net_state;
+	struct napi_struct napi;
+	struct work_struct net_start_work;
+	struct work_struct net_stop_work;
+	void *netregs;
+	void *g_outaddr;
+	void *g_ccsr;
+	void *fpga_reg;
+	uint64_t msix_addr;
+	uint32_t msix_value;
+	unsigned long fpga_irq;
+	char tx_name[32];
+	int interface_id;
+	uint64_t rx_count;
+	uint16_t tx_error;
+	uint64_t qbman_pool;
+	struct task_struct *poll_host;/*inic_thread*/
+#if FSLU_NVME_INIC_QDMA
+        struct tx_buf_desc *tx_buf[DPAA2_ETH_NUM_TX_BUFS];
+        uint64_t tx_buf_count;
+        uint64_t tx_buf_ready;
+        uint64_t tx_buf_dma;
+        uint64_t tx_buf_free;
+        uint64_t rx_buf_count;
+        uint64_t rx_buf[700];
+/*qdma related*/
+	struct dma_chan *dma_chan;
+	struct dma_device *dma_device;
+        volatile int qdma_flag;
+
+
+#endif
+#endif
+
+
 };
 
 /* default Rx hash options, set during probing */

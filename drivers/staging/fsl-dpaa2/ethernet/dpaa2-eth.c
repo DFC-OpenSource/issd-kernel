@@ -28,6 +28,7 @@
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
+#include <inic_config.h>
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
@@ -42,6 +43,47 @@
 #include "../../fsl-mc/include/mc-sys.h"
 #include "dpaa2-eth.h"
 
+#if FSLU_NVME_INIC
+#include <linux/platform_device.h>
+#include <linux/of.h>
+#include <linux/of_platform.h>
+#include <linux/of_address.h>
+#include<linux/hardirq.h>
+#include<linux/irqdomain.h>
+#include <linux/of_irq.h>
+#include <linux/delay.h>
+unsigned long irq_start = 40;
+uint64_t txpacket_count,drop_count;
+static struct global_data
+{
+    uint64_t pci_config;
+    uint64_t dma_virt;
+    uint64_t dreg_config;
+    uint64_t pci_outbound;
+    uint64_t dma_msix;
+    uint64_t dma_netreg;
+    uint64_t priv[10];
+    dma_addr_t dma_handle,dma_bkp;
+#if FSLU_NVME_INIC_QDMA
+    struct dma_chan *dma_chan;/*to store qdma engine dma channel */
+    struct dma_device *dma_device;/*to store device having multiple channels*/
+#endif
+}global_mem;
+static struct global_data *global = &global_mem;
+#if FSLU_NVME_INIC_QDMA
+/*rx side dma descriptor for call back function*/
+struct rx_dma_desc {
+uint64_t src_addr;
+uint64_t dest_addr;
+uint64_t len_offset_flag;
+int rx_desc_offset;
+struct dpaa2_eth_priv *priv;
+};
+#endif
+
+#endif /* FSLU_NVME_INIC */
+
+
 /* CREATE_TRACE_POINTS only needs to be defined once. Other dpa files
  * using trace events only need to #include <trace/events/sched.h>
  */
@@ -55,6 +97,103 @@ MODULE_DESCRIPTION("Freescale DPAA2 Ethernet Driver");
 static int debug = -1;
 module_param(debug, int, S_IRUGO);
 MODULE_PARM_DESC(debug, "Module/Driver verbosity level");
+
+#if FSLU_NVME_INIC
+#define SHARED_CONF_SIZE (128*1024*1024)
+#define PEX3 0x3600000
+/* Ring and Frame size -- these must match between the drivers */
+#if FSLU_NVME_INIC_QDMA
+#define PH_RING_SIZE    (16800)
+#define RX_BD_RING_SIZE (16800)
+#define RX_BUF_REUSE_COUNT 700
+#endif
+#if FSLU_NVME_INIC_DPAA2
+#define PH_RING_SIZE    (168000)
+#define RX_BD_RING_SIZE (84000)
+#endif
+#define REFILL_RING_SIZE 30
+#define REFILL_POOL_SIZE 350
+#define REFILL_THRESHOLD 350
+#define MTU_INIC 4000
+#define TX_ERROR 0x8
+#define TX_CLEAR 0x4
+/* Buffer Descriptor Registers */
+#define INTERFACE_REG           0x300000
+#define PCINET_TXBD_BASE        0x800
+#define PCINET_RXBD_BASE        0x200000
+#define PCINET_TXCONF_BASE      0x7fd00
+#define BUF_CONF                0x5
+#define BUF_RELEASE             0x6
+#define IFACE_IDLE              0x7
+#define IFACE_UP                0x8
+#define IFACE_READY             0x9
+#define IFACE_DOWN              0xa
+#define IFACE_STOP              0xb
+#define MAC_SET           0x02
+#define MAC_NOTSET        0x00
+/* MSI */
+#define MSI_DISABLE             0x2
+#define MSI_ENABLE              0x1
+#define REFILL_CLEAR_REQUEST    0x1
+#define REFILL_REQUEST          0x2
+/* Buffer Descriptor Status */
+#define BD_MEM_READY     0x1
+#define BD_MEM_DIRTY     0x2
+#define BD_MEM_FREE      0x4
+#define BD_MEM_CONSUME   0x8
+#define BD_IRQ_SET       0x4
+#define BD_IRQ_MASK      0x8
+#define BD_IRQ_CLEAR     0x2
+#define LINK_STATE_UP    0x8
+#define LINK_STATE_DOWN  0x4
+#define LINK_STATUS  0x2
+#if FSLU_NVME_INIC_DPAA2
+#define BP_PULL_SET  0x1
+#define BP_PULL_DONE 0x2
+#define BP_PULL_CLEAR 0x3
+#endif
+#define PEX_OFFSET 0x1400000000
+#define DPBP_TIMEOUT     600 /* 10 Min */
+#define NUM_NET_DEV 2
+static struct of_device_id nic_of_genirq_match[] = {
+        { .compatible = "arm,gic-v3", },
+        { },
+};
+static void  nic_open(struct work_struct *work);
+static void  nic_stop(struct work_struct *work);
+static int if_count=0;
+/*----------------------------------------------------------------------------*/
+/* VVDN gen MSI                                     */
+/*----------------------------------------------------------------------------*/
+
+static inline void generate_msi(struct dpaa2_eth_priv *priv)
+{
+
+    iowrite32(priv->msix_value, priv->msix_addr);
+
+}
+/*----------------------------------------------------------------------------*/
+/* Buffer Descriptor Accessor Helpers                                         */
+/*----------------------------------------------------------------------------*/
+
+static inline void cbd_write(void __iomem *addr, u32 val)
+{
+    iowrite32(val, addr);
+}
+
+static inline u32 cbd_read(void __iomem *addr)
+{
+    return ioread32(addr);
+}
+
+static inline void cbd_write16(void __iomem *addr, u16 val)
+{
+    iowrite16(val, addr);
+}
+
+static int dpaa2_dpbp_refill_custom(struct dpaa2_eth_priv *priv, uint16_t bpid);
+#endif /* FSLU_NVME_INIC */
+
 
 /* Oldest DPAA2 objects version we are compatible with */
 #define DPAA2_SUPPORTED_DPNI_VERSION	6
@@ -227,11 +366,181 @@ static struct sk_buff *dpaa2_eth_build_frag_skb(struct dpaa2_eth_priv *priv,
 	return skb;
 }
 
+#if FSLU_NVME_INIC_QDMA
+void rx_qdma_callback(void *arg)
+{
+
+	struct rx_dma_desc *ptd =(struct rx_dma_desc*)arg;
+spin_lock(&ptd->priv->rx_dma_lock);
+	struct circ_buf_desc *bdp;
+        ptd->len_offset_flag|=BD_MEM_DIRTY;
+        bdp = (ptd->priv->rx_base + ptd->rx_desc_offset);
+        cbd_write(&bdp->len_offset_flag,ptd->len_offset_flag);
+        ptd->priv->rx_buf[ptd->priv->rx_buf_count++] = ptd->src_addr;
+/*refill  TODO  delaying callback should be minimal*/
+	if(ptd->priv->rx_buf_count>=RX_BUF_REUSE_COUNT)
+	{/*refill buff pool and reset the count */
+               // printk("PCIE:%s priv->rx_buf_count:-%d\n",__func__,ptd->priv->rx_buf_count);
+		ptd->priv->rx_buf_count=0;
+		dpaa2_dpbp_refill_custom(ptd->priv, ptd->priv->dpbp_attrs.bpid);
+
+	}
+/*end*/
+	if(ptd->priv->bman_buf->napi_msi != MSI_DISABLE) {
+		generate_msi(ptd->priv);
+	}
+        kfree(ptd);
+spin_unlock(&ptd->priv->rx_dma_lock);
+return;
+}
+#endif
+
 static void dpaa2_eth_rx(struct dpaa2_eth_priv *priv,
 			 struct dpaa2_eth_channel *ch,
 			 const struct dpaa2_fd *fd,
 			 struct napi_struct *napi)
 {
+
+#if FSLU_NVME_INIC
+#if FSLU_NVME_INIC_DPAA2
+	struct rtnl_link_stats64 *percpu_stats;
+	int i = 0;
+	struct circ_buf_desc *bdp;
+    uint32_t len_offset_flag =0;
+	uint64_t addr = 0;
+	spin_lock(&priv->rx_desc_lock);
+    priv->rx_count++;
+	bdp = priv->cur_rx;
+#if 0
+	/* traffic exceeds ring size LS2 can't drop packets TODO */
+	if ((cbd_read(&bdp->len_offset_flag) & 0xf) != BD_MEM_READY) {
+		printk( "PCIE:%s RX packets are  overflow  \n",__func__);
+
+	}
+#endif
+	if(priv->rx_count >= REFILL_THRESHOLD)
+	{
+	    dpaa2_dpbp_refill_custom(priv, priv->dpbp_attrs.bpid);
+		priv->rx_count =0;
+	}
+
+        addr=(((uint64_t)dpaa2_fd_get_addr(fd))-(0x1400000000));
+        addr |=addr>>32;
+
+	len_offset_flag=((uint32_t)dpaa2_fd_get_len(fd)<<16);
+	len_offset_flag |= (dpaa2_fd_get_offset(fd)<<4);
+	len_offset_flag |= BD_MEM_DIRTY;
+    //cbd_write(&bdp->addr_lower,(uint32_t)addr);
+    //cbd_write(&bdp->len_offset_flag,len_offset_flag);
+        writeq(((uint64_t)addr<<32)|(len_offset_flag),&bdp->len_offset_flag);
+
+	if ((bdp - priv->rx_base) == (RX_BD_RING_SIZE - 1)) {
+		bdp = priv->rx_base;
+	} else {
+		bdp++;
+	}
+	priv->cur_rx = bdp;
+
+	percpu_stats = this_cpu_ptr(priv->percpu_stats);
+	percpu_stats->rx_packets++;
+
+	if(priv->bman_buf->napi_msi != MSI_DISABLE) {
+		generate_msi(priv);
+	}
+
+	spin_unlock(&priv->rx_desc_lock);
+	return;
+#endif/*FSLU_NVME_INIC_DPAA2*/
+#if FSLU_NVME_INIC_QDMA
+	struct rtnl_link_stats64 *percpu_stats;
+	int i = 0;
+	struct circ_buf_desc *bdp;
+	spin_lock(&priv->rx_desc_lock);
+        int len=0,offset=0;
+	bdp = priv->cur_rx;
+        struct dma_async_tx_descriptor *txd;
+	dma_cookie_t cookie;
+        struct rx_dma_desc *ptd;
+        ptd=kzalloc(sizeof(struct rx_dma_desc),GFP_ATOMIC);
+#if 1
+        ptd->dest_addr=readq(&bdp->len_offset_flag);
+	/* traffic exceeds ring size LS2 can't drop packets TODO */
+	if ((ptd->dest_addr & 0xf) != BD_MEM_READY) {
+		printk( "PCIE:%s RX packets are  overflow  \n",__func__);
+
+	}
+#endif
+
+
+        ptd->dest_addr = (uint32_t)(ptd->dest_addr>>32);
+        ptd->dest_addr |=((uint64_t)(ptd->dest_addr&0xf)<<32);
+        ptd->dest_addr  = (uint64_t)(ptd->dest_addr & 0xfffffffffffffff0);
+        ptd->dest_addr = ptd->dest_addr + PEX_OFFSET;
+
+        ptd->src_addr = ((uint64_t)dpaa2_fd_get_addr(fd));
+
+	len=dpaa2_fd_get_len(fd);
+	offset=dpaa2_fd_get_offset(fd);
+
+        ptd->rx_desc_offset=(bdp - priv->rx_base);
+        ptd->priv=priv;
+        ptd->len_offset_flag=((uint32_t)len<<16);
+	ptd->len_offset_flag |= (offset<<4);
+
+        //print_hex_dump(KERN_DEBUG, "rx-src:", DUMP_PREFIX_NONE, 16, 1, (void*)(phys_to_virt(ptd->src_addr+offset)), 14, true);
+
+	txd = priv->dma_device->device_prep_dma_memcpy(priv->dma_chan,(ptd->dest_addr),ptd->src_addr,(len+offset),DMA_PREP_INTERRUPT|DMA_CTRL_ACK);
+		if (unlikely(!txd))
+		{
+			uint64_t dest_addr;
+			dest_addr=ptd->dest_addr-PEX_OFFSET;
+			dest_addr +=priv->g_outaddr;
+			memcpy(dest_addr,phys_to_virt(ptd->src_addr),(len+offset));
+			printk("%s qdma mapping error doing cpu memcpy \n",__func__);
+			rx_qdma_callback(ptd);
+			goto rx_dma_err;
+		}
+		txd->callback = rx_qdma_callback;
+		txd->callback_param = ptd;
+		cookie = dmaengine_submit(txd);
+		if (unlikely(dma_submit_error(cookie))) {
+			uint64_t dest_addr;
+			dest_addr=ptd->dest_addr-PEX_OFFSET;
+			dest_addr +=priv->g_outaddr;
+			memcpy(dest_addr,phys_to_virt(ptd->src_addr),(len+offset));
+			printk("%s qdma dma submit error doing cpu memcpy \n",__func__);
+			rx_qdma_callback(ptd);
+			goto rx_dma_err;
+		}
+                dma_async_issue_pending(priv->dma_chan);
+
+rx_dma_err:
+#if 0
+	if(priv->rx_buf_count>=RX_BUF_REUSE_COUNT)
+	{/*refill buff pool and reset the count */
+                printk("PCIE:%s priv->rx_buf_count:-%d\n",__func__,priv->rx_buf_count);
+		priv->rx_buf_count=0;
+		dpaa2_dpbp_refill_custom(priv, priv->dpbp_attrs.bpid);
+
+	}
+#endif
+	if ((bdp - priv->rx_base) == (RX_BD_RING_SIZE - 1)) {
+		bdp = priv->rx_base;
+	} else {
+		bdp++;
+	}
+	priv->cur_rx = bdp;
+
+	percpu_stats = this_cpu_ptr(priv->percpu_stats);
+	percpu_stats->rx_packets++;
+
+	spin_unlock(&priv->rx_desc_lock);
+	return;
+#endif /*FSLU_NVME_INIC_QDMA*/
+
+
+
+#else
 	dma_addr_t addr = dpaa2_fd_get_addr(fd);
 	u8 fd_format = dpaa2_fd_get_format(fd);
 	void *vaddr;
@@ -310,6 +619,7 @@ err_frame_format:
 err_build_skb:
 	dpaa2_eth_free_rx_fd(priv, fd, vaddr);
 	percpu_stats->rx_dropped++;
+#endif /* FSLU_NVME_INIC */
 }
 
 #ifdef CONFIG_FSL_DPAA2_ETH_USE_ERR_QUEUE
@@ -388,7 +698,7 @@ static int dpaa2_eth_store_consume(struct dpaa2_eth_channel *ch)
 
 	return cleaned;
 }
-
+#if !(FSLU_NVME_INIC)
 static int dpaa2_eth_build_sg_fd(struct dpaa2_eth_priv *priv,
 				 struct sk_buff *skb,
 				 struct dpaa2_fd *fd)
@@ -711,12 +1021,451 @@ err_alloc_headroom:
 
 	return NETDEV_TX_OK;
 }
+#endif
+#if FSLU_NVME_INIC_QDMA
+void tx_qdma_callback(void *arg)
+{
+
+
+	struct dpaa2_eth_priv *priv=(struct dpaa2_eth_priv*)arg;
+	spin_lock(&priv->tx_desc_lock);
+	//priv->qdma_flag=0;
+
+
+        int err,i;
+	struct rtnl_link_stats64 *percpu_stats;
+	struct dpaa2_fd fd;
+	uint64_t dest_addr;
+	uint16_t len=0;
+	memset(&fd, 0, sizeof(fd));
+
+	dest_addr=priv->tx_buf[priv->tx_buf_dma]->addr;
+	priv->tx_buf[priv->tx_buf_dma]->flag=BD_MEM_DIRTY;
+	//printk("PCIE:%s callback executed dest addr: %p processor id:%d\n",__func__,dest_addr,smp_processor_id());
+
+	len=priv->cur_tx_dma->len_offset_flag>>16;
+	priv->cur_tx_dma->len_offset_flag=BD_MEM_FREE;/*dma copy done now host can free its packet*/
+
+	/* Setup the FD fields */
+	dpaa2_fd_set_addr(&fd,dest_addr);
+	dpaa2_fd_set_offset(&fd,priv->tx_data_offset);
+	dpaa2_fd_set_bpid(&fd, priv->dpbp_attrs.bpid);
+	dpaa2_fd_set_len(&fd, len);
+	dpaa2_fd_set_format(&fd, dpaa2_fd_single);
+	(&fd)->simple.ctrl = DPAA2_FD_CTRL_ASAL | DPAA2_FD_CTRL_PTA | DPAA2_FD_CTRL_PTV1;
+
+	//print_hex_dump(KERN_DEBUG, __func__, DUMP_PREFIX_NONE, 16, 1, phys_to_virt(dest_addr+priv->tx_data_offset), 14, true);
+	percpu_stats = this_cpu_ptr(priv->percpu_stats);
+
+	//wmb();
+	for (i = 0; i < (DPAA2_ETH_MAX_TX_QUEUES<<1); i++) {
+		err = dpaa2_io_service_enqueue_qd(NULL, priv->tx_qdid,
+				0, priv->fq[0].flowid, &fd);
+		if (err != -EBUSY)
+		{
+			break;
+		}
+	}
+
+	if (unlikely(err < 0)) {
+		percpu_stats->tx_errors++;
+		printk("PCIE: %s enqueu error\n",__func__);
+		priv->tx_buf[priv->tx_buf_dma]->flag=BD_MEM_READY;
+		goto enque_err;
+	}
+
+	percpu_stats->tx_packets++;
+
+enque_err:
+
+	if(priv->tx_buf_dma==(DPAA2_ETH_NUM_TX_BUFS-1))
+	{
+		priv->tx_buf_dma=0;
+	}
+	else
+	{
+		priv->tx_buf_dma++;
+	}
+
+	if ((priv->cur_tx_dma - priv->tx_base) == (PH_RING_SIZE - 1))
+	{
+		priv->cur_tx_dma = priv->tx_base;
+	}
+	else
+	{
+		priv->cur_tx_dma++;
+	}
+
+	spin_unlock(&priv->tx_desc_lock);
+	return;
+
+}
+#endif/*FSLU_NVME_INIC_QDMA*/
+
+#if FSLU_NVME_INIC
+static int nic_tx_napi(struct napi_struct *napi, int budget)
+{
+
+
+
+	struct dpaa2_eth_priv *priv = container_of(napi, struct dpaa2_eth_priv, napi);
+	int received = 0;
+
+	//spin_lock(&priv->tx_desc_lock);
+#if FSLU_NVME_INIC_DPAA2
+	int i,err;
+	uint32_t reg=0;
+	struct circ_buf_desc *bdp;
+	struct rtnl_link_stats64 *percpu_stats;
+
+	bdp = priv->cur_tx;
+	uint64_t addr_binfo=0;
+	while (received < budget) {
+
+
+		struct dpaa2_fd fd;
+
+		if ((bdp->len_offset_flag & 0xf) != BD_MEM_DIRTY) {
+			break;
+		}
+
+		/* Setup the FD fields */
+		memset(&fd, 0, sizeof(fd));
+		addr_binfo = bdp->addr_lower;
+		addr_binfo |= ((uint64_t)(addr_binfo&0x20)<<27);
+#if FSLU_NVME_INIC_SG
+		if(addr_binfo & 0x10)
+		{
+			dpaa2_fd_set_format(&fd, dpaa2_fd_sg);
+		}
+		else
+		{
+#endif
+			dpaa2_fd_set_format(&fd, dpaa2_fd_single);
+#if FSLU_NVME_INIC_SG
+		}
+#endif
+		addr_binfo = ((uint64_t)addr_binfo & 0xffffffffffffffc0);
+		dpaa2_fd_set_addr(&fd,(dma_addr_t)((addr_binfo) + 0x1400000000));
+		dpaa2_fd_set_offset(&fd, (uint16_t)((bdp->len_offset_flag>>4)&0x0fff));
+		dpaa2_fd_set_bpid(&fd, priv->dpbp_attrs.bpid);
+		dpaa2_fd_set_len(&fd, (bdp->len_offset_flag>>16));
+		(&fd)->simple.ctrl = DPAA2_FD_CTRL_ASAL | DPAA2_FD_CTRL_PTA | DPAA2_FD_CTRL_PTV1;
+		// printk("PCIE:-tx %p \n",bdp->addr_lower);
+		percpu_stats = this_cpu_ptr(priv->percpu_stats);
+		/* FIXME Ugly hack, and not even cpu hotplug-friendly*/
+		bdp->len_offset_flag=BD_MEM_CONSUME;
+	        mb();
+		for (i = 0; i < (DPAA2_ETH_MAX_TX_QUEUES<<1); i++) {
+#if 0
+/*multiq*/
+			err = dpaa2_io_service_enqueue_qd(NULL, priv->tx_qdid,
+					0, priv->fq[(uint16_t)(bdp->addr_lower&0xf)].flowid, &fd);
+#endif
+/*single queue */
+			err = dpaa2_io_service_enqueue_qd(NULL, priv->tx_qdid,
+					0, priv->fq[0].flowid, &fd);
+			if (err != -EBUSY)
+			{
+				break;
+			}
+		}
+		if (unlikely(err < 0)) {
+                        printk("enque_err\n");
+			percpu_stats->tx_errors++;
+			bdp->len_offset_flag=0xf0;
+			bdp->len_offset_flag|=BD_MEM_FREE;
+			goto enque_err;
+		}
+
+
+		percpu_stats->tx_packets++;
+enque_err:
+
+		if ((bdp - priv->tx_base) == (PH_RING_SIZE - 1))
+		{
+			bdp = priv->tx_base;
+		}
+		else
+		{
+			bdp++;
+		}
+
+
+		received++;
+	}
+#endif/*FSLU_NVME_INIC_DPAA2*/
+#if FSLU_NVME_INIC_QDMA
+	int i,err,len=0;
+	uint32_t reg=0;
+	struct circ_buf_desc *bdp;
+#if 0
+	struct rtnl_link_stats64 *percpu_stats;
+#endif
+        struct device *dev = priv->net_dev->dev.parent;
+        dma_addr_t addr;
+	bdp = priv->cur_tx;
+	uint64_t src_addr=0,dest_addr=0,temp_addr;
+        uint16_t offset=0;
+        struct dma_async_tx_descriptor *txd;
+	while (received < budget) {
+
+		dma_cookie_t cookie;
+		if ((bdp->len_offset_flag & 0xf) != BD_MEM_DIRTY) {
+			break;
+		}
+		if(priv->tx_buf[priv->tx_buf_ready]->flag!=BD_MEM_READY)
+		{
+			printk("PCIE:%s tx buffers not available to process  and flag: %p \n",__func__,priv->tx_buf[priv->tx_buf_ready]->flag);
+			break;
+		}
+
+		dest_addr=priv->tx_buf[priv->tx_buf_ready]->addr;
+		priv->tx_buf[priv->tx_buf_ready]->flag=BD_MEM_CONSUME;
+	        memset(phys_to_virt(dest_addr + priv->buf_layout.private_data_size), 0, 8); /*doing annotation memset here to reduce callback work*/
+
+
+
+		offset=(uint16_t)((bdp->len_offset_flag>>4)&0x0fff);
+		len=bdp->len_offset_flag>>16;
+                bdp->len_offset_flag |= BD_MEM_CONSUME;/*after dma copy done we will set it to free just to avoid loop whole descriptor again if it is dirty*/
+		//queue=(uint16_t)(bdp->addr_lower&0xf);
+		/*disable queue selection over head always use queue zero*/
+
+
+
+		src_addr = bdp->addr_lower;
+		src_addr |= ((uint64_t)(src_addr&0x20)<<27);
+		src_addr  = (src_addr & 0xffffffffffffffc0);
+                //print_hex_dump(KERN_DEBUG, "tx-src:", DUMP_PREFIX_NONE, 16, 1, (void*)(priv->g_outaddr+src_addr+offset), 14, true);
+		src_addr = PEX_OFFSET + src_addr+offset;
+
+
+		//wmb();
+/*qdma related operations*/
+	        //priv->qdma_flag=1;
+               // printk("dma  started dest addr:%p \n",dest_addr);
+
+		txd = priv->dma_device->device_prep_dma_memcpy(priv->dma_chan,(dest_addr+priv->tx_data_offset),src_addr, len,DMA_PREP_INTERRUPT|DMA_CTRL_ACK);
+		if (!txd)
+		{
+                        src_addr-=PEX_OFFSET;
+                        src_addr=priv->g_outaddr+offset;/*phys to virt*/
+                        memcpy(phys_to_virt(dest_addr+priv->tx_data_offset),src_addr,len);
+			printk("%s qdma mapping error doing cpu memcpy \n",__func__);
+                        tx_qdma_callback(priv);
+			goto dma_err;
+
+		}
+		txd->callback = tx_qdma_callback;
+		txd->callback_param = priv;
+		cookie = dmaengine_submit(txd);
+		if (dma_submit_error(cookie)) {
+                        src_addr-=PEX_OFFSET;
+                        src_addr=priv->g_outaddr+offset;/*phys to virt*/
+                        memcpy(phys_to_virt(dest_addr+priv->tx_data_offset),src_addr,len);
+			printk("%s qdma dma submit error doing cpu memcpy \n",__func__);
+                        tx_qdma_callback(priv);
+                        goto dma_err;
+		}
+                dma_async_issue_pending(priv->dma_chan);
+
+/*move below code to callback function*/
+#if 0
+		struct dpaa2_fd fd;
+		memset(&fd, 0, sizeof(fd));
+
+
+		while(priv->qdma_flag)
+		{
+			printk("napi loop\n");
+		}
+		memset(phys_to_virt(dest_addr + priv->buf_layout.private_data_size), 0, 8);
+		bdp->len_offset_flag=BD_MEM_FREE;
+		/* Setup the FD fields */
+                dpaa2_fd_set_addr(&fd,dest_addr);
+		dpaa2_fd_set_offset(&fd,priv->tx_data_offset);
+		dpaa2_fd_set_bpid(&fd, priv->dpbp_attrs.bpid);
+		dpaa2_fd_set_len(&fd, len);
+                dpaa2_fd_set_format(&fd, dpaa2_fd_single);
+		(&fd)->simple.ctrl = DPAA2_FD_CTRL_ASAL | DPAA2_FD_CTRL_PTA | DPAA2_FD_CTRL_PTV1;
+                //print_hex_dump(KERN_DEBUG, __func__, DUMP_PREFIX_NONE, 16, 1, phys_to_virt(dest_addr+priv->tx_data_offset), 14, true);
+		percpu_stats = this_cpu_ptr(priv->percpu_stats);
+	        //wmb();
+		for (i = 0; i < (DPAA2_ETH_MAX_TX_QUEUES<<1); i++) {
+			err = dpaa2_io_service_enqueue_qd(NULL, priv->tx_qdid,
+					0, priv->fq[queue].flowid, &fd);
+			if (err != -EBUSY)
+			{
+				break;
+			}
+		}
+
+		if (unlikely(err < 0)) {
+			percpu_stats->tx_errors++;
+			printk("PCIE: %s enqueu error\n",__func__);
+                        priv->tx_buf[priv->tx_buf_ready]->flag=BD_MEM_READY;
+			goto enque_err;
+		}
+
+		percpu_stats->tx_packets++;
+
+#endif
+dma_err:
+               if(priv->tx_buf_ready==(DPAA2_ETH_NUM_TX_BUFS-1))
+		{
+			priv->tx_buf_ready=0;
+		}
+		else
+		{
+			priv->tx_buf_ready++;
+		}
+/* if there is enqueu or dma error  don't update tx_buf count and set flag to ready*/
+
+		if ((bdp - priv->tx_base) == (PH_RING_SIZE - 1))
+		{
+			bdp = priv->tx_base;
+		}
+		else
+		{
+			bdp++;
+		}
+
+
+		received++;
+	}
+#endif
+
+	priv->cur_tx = bdp;
+#if FSLU_NVME_INIC_POLL
+	received =65;
+#endif
+	if (received < budget) {
+		napi_complete(napi);
+#if FSLU_NVME_INIC_QDMA_IRQ
+		iowrite32(BD_IRQ_CLEAR,&priv->flags_ptr->tx_irq_flag);
+#endif
+#if FSLU_NVME_FPGA_IRQ
+		enable_irq(priv->fpga_irq);
+		reg=ioread32(priv->fpga_reg+0x3800);
+		iowrite32(0x0,priv->fpga_reg + 0x3800);
+		reg = (reg & (~(1<<priv->interface_id)));
+		iowrite32(reg,priv->fpga_reg + 0x3800);
+#endif
+	}
+
+	//spin_unlock(&priv->tx_desc_lock);
+	return received;
+
+
+}
+
+static int dpaa2_eth_tx(struct sk_buff *skb, struct net_device *net_dev)
+{
+	return NETDEV_TX_OK;
+
+}
+#endif /* FSLU_NVME_INIC */
 
 static void dpaa2_eth_tx_conf(struct dpaa2_eth_priv *priv,
 			      struct dpaa2_eth_channel *ch,
 			      const struct dpaa2_fd *fd,
 			      struct napi_struct *napi __always_unused)
 {
+
+#if FSLU_NVME_INIC
+#if FSLU_NVME_INIC_DPAA2
+
+	struct rtnl_link_stats64 *percpu_stats;
+	spin_lock(&priv->tx_conf_lock);
+	struct circ_buf_desc *bdp;
+	bdp = priv->cur_conf;
+	uint64_t addr_binfo=0;
+
+
+	percpu_stats = this_cpu_ptr(priv->percpu_stats);
+	while((bdp->len_offset_flag & 0xf) != BD_MEM_CONSUME)
+	{
+               printk("%p tx_conf \n",bdp->len_offset_flag);
+		if ((bdp - priv->tx_base) == (PH_RING_SIZE - 1)) {
+			bdp = priv->tx_base;
+		} else {
+			bdp++;
+		}
+
+		percpu_stats->tx_dropped++;
+	}
+	bdp->len_offset_flag = BD_MEM_FREE;
+	if ((bdp - priv->tx_base) == (PH_RING_SIZE - 1)) {
+		bdp = priv->tx_base;
+	} else {
+		bdp++;
+	}
+
+        percpu_stats->tx_errors++;
+
+	priv->cur_conf = bdp;
+        mb();
+	spin_unlock(&priv->tx_conf_lock);
+	return ;
+#endif/*FSLU_NVME_INIC_DPAA2*/
+#if FSLU_NVME_INIC_QDMA
+	struct rtnl_link_stats64 *percpu_stats;
+	spin_lock(&priv->tx_conf_lock);
+        dma_addr_t fd_addr;
+	//struct circ_buf_desc *bdp;
+	//bdp = priv->cur_conf;
+        uint32_t status = 0,len=0;
+	uint64_t addr_binfo=0;
+        struct dpaa2_fas *fas;
+        struct device *dev = priv->net_dev->dev.parent;
+	percpu_stats = this_cpu_ptr(priv->percpu_stats);
+
+        fd_addr = dpaa2_fd_get_addr(fd);
+        addr_binfo = phys_to_virt(fd_addr);
+
+        len=dpaa2_fd_get_len(fd);
+        //printk("PCIE:%s addr:%p len:%d offset:%d\n ",__func__,virt_to_phys(addr_binfo),len,dpaa2_fd_get_offset(fd));
+
+        //dma_unmap_single(dev, fd_addr,priv->tx_data_offset+len, DMA_TO_DEVICE);
+
+	/*tx_error checking*/
+	fas = (struct dpaa2_fas *)((addr_binfo) + priv->buf_layout.private_data_size);
+	status = le32_to_cpu(fas->status);
+	if (status & DPAA2_ETH_TXCONF_ERR_MASK) {
+		printk("TxConf frame error(s): 0x%08x\n",status & DPAA2_ETH_TXCONF_ERR_MASK);
+		/* Tx-conf logically pertains to the egress path. */
+		percpu_stats->tx_errors++;
+	}
+
+
+	if(priv->tx_buf[priv->tx_buf_free]->flag!=BD_MEM_DIRTY)
+	{
+		printk("PCEI : %s wrong conformation \n");
+	}
+        else
+        {
+        priv->tx_buf[priv->tx_buf_free]->flag=BD_MEM_READY;
+        }
+
+	if(priv->tx_buf_free==(DPAA2_ETH_NUM_TX_BUFS - 1))
+	{
+		priv->tx_buf_free=0;
+	}
+	else
+	{
+		priv->tx_buf_free++;
+	}
+        wmb();
+
+        percpu_stats->tx_dropped++;
+	spin_unlock(&priv->tx_conf_lock);
+	return ;
+
+#endif /*FSLU_NVME_INIC_QDMA*/
+#else
+
+
 	struct rtnl_link_stats64 *percpu_stats;
 	struct dpaa2_eth_stats *percpu_extras;
 	u32 status = 0;
@@ -737,6 +1486,7 @@ static void dpaa2_eth_tx_conf(struct dpaa2_eth_priv *priv,
 		/* Tx-conf logically pertains to the egress path. */
 		percpu_stats->tx_errors++;
 	}
+#endif
 }
 
 static int dpaa2_eth_set_rx_csum(struct dpaa2_eth_priv *priv, bool enable)
@@ -792,32 +1542,52 @@ static int dpaa2_eth_set_tx_csum(struct dpaa2_eth_priv *priv, bool enable)
 	return 0;
 }
 
+#if FSLU_NVME_INIC_DPAA2
+static int dpaa2_bp_add_7(struct dpaa2_eth_priv *priv, u16 bpid, void __iomem *array_addr)
+#else
 static int dpaa2_bp_add_7(struct dpaa2_eth_priv *priv, u16 bpid)
+#endif
 {
 	struct device *dev = priv->net_dev->dev.parent;
 	u64 buf_array[7];
 	void *buf;
 	dma_addr_t addr;
 	int i;
+#if FSLU_NVME_INIC_DPAA2
+	uint64_t paddr;
+#endif /* FSLU_NVME_INIC_DPAA2 */
+
 
 	for (i = 0; i < 7; i++) {
 		/* Allocate buffer visible to WRIOP + skb shared info +
 		 * alignment padding
 		 */
+#if !(FSLU_NVME_INIC_DPAA2)
 		buf = napi_alloc_frag(DPAA2_ETH_BUF_RAW_SIZE);
 		if (unlikely(!buf)) {
 			dev_err(dev, "buffer allocation failed\n");
 			goto err_alloc;
 		}
 		buf = PTR_ALIGN(buf, DPAA2_ETH_RX_BUF_ALIGN);
-
+#if !(FSLU_NVME_INIC_QDMA)
 		addr = dma_map_single(dev, buf, DPAA2_ETH_RX_BUFFER_SIZE,
 				      DMA_FROM_DEVICE);
 		if (unlikely(dma_mapping_error(dev, addr))) {
 			dev_err(dev, "dma_map_single() failed\n");
 			goto err_map;
 		}
+#else
+		addr=virt_to_phys(buf);
+#endif
 		buf_array[i] = addr;
+#else
+		paddr =  ioread32(array_addr);
+		paddr |=((uint64_t)(paddr&0xf)<<32);
+		paddr = (paddr & 0xfffffffffffffff0);
+		paddr = 0x1400000000 + paddr;
+		buf_array[i] = paddr;
+		array_addr = array_addr + 0x04;
+#endif /* FSLU_NVME_INIC_DPAA2 */
 
 		/* tracing point */
 		trace_dpaa2_eth_buf_seed(priv->net_dev,
@@ -853,7 +1623,13 @@ static int dpaa2_dpbp_seed(struct dpaa2_eth_priv *priv, u16 bpid)
 {
 	int i, j;
 	int new_count;
-
+#if FSLU_NVME_INIC_DPAA2
+	dma_addr_t buf_addr;
+	void __iomem *array_addr;
+	struct buf_pool_desc *bman_pool;
+	bman_pool=priv->bman_buf;
+	array_addr = bman_pool->pool_addr + priv->g_outaddr;
+#endif
 	/* This is the lazy seeding of Rx buffer pools.
 	 * dpaa2_bp_add_7() is also used on the Rx hotpath and calls
 	 * napi_alloc_frag(). The trouble with that is that it in turn ends up
@@ -861,35 +1637,55 @@ static int dpaa2_dpbp_seed(struct dpaa2_eth_priv *priv, u16 bpid)
 	 * Rather than splitting up the code, do a one-off preempt disable.
 	 */
 	preempt_disable();
-	for (j = 0; j < priv->num_channels; j++) {
-		for (i = 0; i < DPAA2_ETH_NUM_BUFS; i += 7) {
-			new_count = dpaa2_bp_add_7(priv, bpid);
-			priv->channel[j]->buf_count += new_count;
+#if FSLU_NVME_INIC_DPAA2
+	for (i = 0; i < DPAA2_ETH_NUM_BUFS; i += 7) {
+		new_count = dpaa2_bp_add_7(priv, bpid, array_addr);
+		if (unlikely(new_count < 7))
+			goto out_of_memory;
+#else
+		for (j = 0; j < priv->num_channels; j++) {
+			for (i = 0; i < DPAA2_ETH_NUM_BUFS; i += 7) {
+				new_count = dpaa2_bp_add_7(priv, bpid);
+				priv->channel[j]->buf_count += new_count;
 
-			if (new_count < 7) {
-				preempt_enable();
-				goto out_of_memory;
+				if (new_count < 7) {
+					preempt_enable();
+					goto out_of_memory;
+				}
 			}
-		}
-	}
-	preempt_enable();
 
-	return 0;
+#endif
+#if FSLU_NVME_INIC_DPAA2
+			array_addr = array_addr + (new_count * 0x04);
+#endif /* FSLU_NVME_INIC_DPAA2 */
+
+		}
+		preempt_enable();
+
+		return 0;
 
 out_of_memory:
-	return -ENOMEM;
+		return -ENOMEM;
 }
 
 /**
  * Drain the specified number of buffers from the DPNI's private buffer pool.
  * @count must not exceeed 7
  */
+#if FSLU_NVME_INIC_DPAA2
+static uint32_t *bp_pull_index;
+static uint32_t  bp_pull_count;
+#endif/*FSLU_NVME_INIC_DPAA2*/
 static void dpaa2_dpbp_drain_cnt(struct dpaa2_eth_priv *priv, int count)
 {
 	struct device *dev = priv->net_dev->dev.parent;
 	u64 buf_array[7];
 	void *vaddr;
 	int ret, i;
+
+#if FSLU_NVME_INIC_DPAA2
+	uint64_t addr;
+#endif
 
 	do {
 		ret = dpaa2_io_service_acquire(NULL, priv->dpbp_attrs.bpid,
@@ -899,12 +1695,21 @@ static void dpaa2_dpbp_drain_cnt(struct dpaa2_eth_priv *priv, int count)
 			return;
 		}
 		for (i = 0; i < ret; i++) {
+#if FSLU_NVME_INIC_DPAA2
+			addr=buf_array[i];
+                        addr=(addr-PEX_OFFSET);
+			addr|=(addr>>32);
+			cbd_write(bp_pull_index,(uint32_t)addr);
+                        bp_pull_index++;
+                        bp_pull_count++;
+#else
 			/* Same logic as on regular Rx path */
 			dma_unmap_single(dev, buf_array[i],
 					 DPAA2_ETH_RX_BUFFER_SIZE,
 					 DMA_FROM_DEVICE);
 			vaddr = phys_to_virt(buf_array[i]);
 			put_page(virt_to_head_page(vaddr));
+#endif
 		}
 	} while (ret);
 }
@@ -913,12 +1718,102 @@ static void __dpaa2_dpbp_free(struct dpaa2_eth_priv *priv)
 {
 	int i;
 
+#if  FSLU_NVME_INIC_DPAA2
+	bp_pull_index = priv->bman_buf->pool_addr + priv->g_outaddr;
+	bp_pull_count = 0;
+#endif
 	dpaa2_dpbp_drain_cnt(priv, 7);
 	dpaa2_dpbp_drain_cnt(priv, 1);
+#if FSLU_NVME_INIC_DPAA2
+	priv->bman_buf->pool_len=bp_pull_count;
+#endif
 
 	for (i = 0; i < priv->num_channels; i++)
 		priv->channel[i]->buf_count = 0;
 }
+
+#if FSLU_NVME_INIC
+ static int dpaa2_dpbp_refill_custom(struct dpaa2_eth_priv *priv, uint16_t bpid)
+{
+#if FSLU_NVME_INIC_DPAA2
+	int new_count;
+	int err = 0;
+
+	struct refill_mem_pool *mem_pool;
+	__le32 length;
+	int i;
+	dma_addr_t buf_addr;
+	void __iomem *array_addr;
+	uint64_t addr_flag=0;
+	mem_pool=priv->mem_pool_cur;
+	for(i=0;i<200000;i++)/*UGLY HACK  but this doesn't happen*/
+	{
+		if(cbd_read(&mem_pool->pool_flag)==BD_MEM_READY)
+		{
+			break;
+		}
+		if(i==199999)
+		{
+			printk("PCIE:refill_fail\n");
+			return 0;
+		}
+	}
+	array_addr = cbd_read(&mem_pool->pool_addr) + priv->g_outaddr;
+
+	for (i = 0; i <REFILL_POOL_SIZE ; i += 7) {
+		new_count = dpaa2_bp_add_7(priv, bpid, array_addr);
+		array_addr = array_addr + (new_count * 0x04);
+	}
+
+	cbd_write(&mem_pool->pool_flag,BD_MEM_FREE);
+	if((mem_pool - priv->mem_pool_base) == (REFILL_RING_SIZE-1))
+	{
+		mem_pool = priv->mem_pool_base;
+	}
+	else
+	{
+		mem_pool++;
+	}
+	priv->mem_pool_cur = mem_pool;
+	return 0;
+#endif/*FSLU_NVME_INIC_DPAA2*/
+#if FSLU_NVME_INIC_QDMA
+
+	int i=0,j=0;
+	struct device *dev = priv->net_dev->dev.parent;
+	uint64_t buf_array[7];
+        uint64_t addr;
+
+	for(i=0;i<RX_BUF_REUSE_COUNT;i++)
+	{
+#if 0
+		addr=priv->rx_buf[i];
+		addr=phys_to_virt(addr);
+		addr = dma_map_single(dev, addr, DPAA2_ETH_RX_BUFFER_SIZE,
+				DMA_FROM_DEVICE);
+		if (dma_mapping_error(dev, addr)) {
+			printk("PCIE: %s dma_map_single() failed\n",__func__);
+			return -1;
+		}
+#endif
+		buf_array[j++]=priv->rx_buf[i];
+		if(j==7)
+		{
+			while (dpaa2_io_service_release(NULL, bpid, buf_array, j))
+				cpu_relax();
+			j=0;
+		}
+	}
+
+
+	return 0;
+
+#endif/*FSLU_NVME_INIC_QDMA*/
+	}
+
+#endif/*FSLU_NVME_INIC*/
+
+
 
 /* Function is called from softirq context only, so we don't need to guard
  * the access to percpu count
@@ -927,6 +1822,10 @@ static int dpaa2_dpbp_refill(struct dpaa2_eth_priv *priv,
 			     struct dpaa2_eth_channel *ch,
 			     u16 bpid)
 {
+#if FSLU_NVME_INIC
+	dump_stack();
+	return 0;
+#else
 	int new_count;
 	int err = 0;
 
@@ -947,7 +1846,160 @@ static int dpaa2_dpbp_refill(struct dpaa2_eth_priv *priv,
 	}
 
 	return err;
+#endif
 }
+
+#if FSLU_NVME_INIC
+#if 0
+#if FSLU_NVME_INIC_DPAA2
+static irqreturn_t nic_irq_handler(int irq, void *data)
+{
+
+	int i;
+	struct global_data *global =(struct global_data*)data;
+	uint32_t reg=0;
+	struct dpaa2_eth_priv *priv =(struct dpaa2_eth_priv*)data;
+#if FSLU_NVME_INIC_QDMA_IRQ
+	//iowrite32(0x10,global->dreg_config + 0x390104);
+	iowrite32(0x12,global->dreg_config + 0x390104);
+	iowrite32(0x0,global->dreg_config + 0x390100);
+#endif
+#if FSLU_NVME_INIC_QDMA_IRQ
+	for(i=0;i<NUM_NET_DEV;i++)
+	{
+		struct dpaa2_eth_priv *priv = (struct dpaa2_eth_priv*)global->priv[i];
+#endif
+#if 1
+	/* support for non blocking boot init moved from probe to irq handler since some flags need to be initialiazed before calling nic_open*/
+	if(unlikely(priv->bman_buf->pool_set==BD_MEM_READY))
+	{
+
+		/*do init at only first time not for every time interface up is called*/
+		priv->rx_base = (priv->bman_buf->rx_desc_base + priv->g_outaddr + 0x400);/*space for refill mem pool*/
+		priv->flags_ptr =  ((unsigned long)priv->bman_buf->rx_desc_base + priv->g_outaddr);//host memory having tx_irq and link state flags
+		priv->mem_pool_base=(priv->bman_buf->rx_desc_base + priv->g_outaddr+ 0x40);//host memory
+		priv->mem_pool_cur= priv->mem_pool_base;//host memory
+		/*fill the buffer pool once*/
+		if (dpaa2_dpbp_seed(priv, priv->dpbp_attrs.bpid)) {
+			printk("Buffer seeding failed for DPBP %d (bpid=%d)\n",priv->dpbp_dev->obj_desc.id, priv->dpbp_attrs.bpid);
+		}
+
+	        priv->bman_buf->pool_set=BD_MEM_FREE;
+	}
+#endif
+
+		if(cbd_read(&priv->flags_ptr->tx_irq_flag) == BD_IRQ_MASK)
+		{
+
+			if(unlikely(priv->bman_buf->iface_status == IFACE_UP)) {
+				schedule_work(&priv->net_start_work);
+#if FSLU_NVME_INIC_QDMA_IRQ
+				iowrite32(BD_IRQ_CLEAR,&priv->flags_ptr->tx_irq_flag);
+#endif
+#if FSLU_NVME_INIC_FPGA_IRQ
+				reg=ioread32(priv->fpga_reg+0x3800);
+				reg = (reg & (~(1<<priv->interface_id)));
+				iowrite32(reg,priv->fpga_reg + 0x3800);
+#endif
+				iowrite32(BD_IRQ_CLEAR,&priv->flags_ptr->tx_irq_flag);
+			} else if(unlikely(priv->bman_buf->iface_status  == IFACE_DOWN)) {
+				schedule_work(&priv->net_stop_work);
+#if FSLU_NVME_INIC_QDMA_IRQ
+				iowrite32(BD_IRQ_CLEAR,&priv->flags_ptr->tx_irq_flag);
+#endif
+#if FSLU_NVME_INIC_FPGA_IRQ
+				reg=ioread32(priv->fpga_reg+0x3800);
+				reg = (reg & (~(1<<priv->interface_id)));
+				iowrite32(reg,priv->fpga_reg + 0x3800);
+#endif
+			} else if(unlikely(priv->bman_buf->pull_rx_buffers==BP_PULL_SET)){
+
+                                __dpaa2_dpbp_free(priv);
+				priv->bman_buf->pull_rx_buffers=BP_PULL_DONE;
+#if FSLU_NVME_INIC_QDMA_IRQ
+				iowrite32(BD_IRQ_CLEAR,&priv->flags_ptr->tx_irq_flag);
+#endif
+
+			}
+
+                          else if(napi_schedule_prep(&priv->napi)){
+#if FSLU_NVME_INIC_FPGA_IRQ
+				disable_irq_nosync(priv->fpga_irq);
+#endif
+#if FSLU_NVME_INIC_QDMA_IRQ
+				iowrite32(BD_IRQ_CLEAR,&priv->flags_ptr->tx_irq_flag);
+#endif
+				__napi_schedule(&priv->napi);
+			}
+#if FSLU_NVME_INIC_QDMA_IRQ
+		}
+#endif
+	}
+		return IRQ_HANDLED;
+}
+#endif/*FSLU_NVME_INIC_DPAA2*/
+#endif
+static int inic_poll_host_work(void *data)
+{
+	struct dpaa2_eth_priv *priv=(struct dpaa2_eth_priv*)data;
+
+	printk("kthread executing on cpu %d\n",smp_processor_id());
+	while(1)
+	{
+#if 1
+		/* support for non blocking boot init moved from probe to irq handler since some flags need to be initialiazed before calling nic_open*/
+		if(unlikely(priv->bman_buf->pool_set==BD_MEM_READY))
+		{
+
+			/*do init at only first time not for every time interface up is called*/
+			priv->rx_base = (priv->bman_buf->rx_desc_base + priv->g_outaddr + 0x400);/*space for refill mem pool*/
+			priv->flags_ptr =  ((unsigned long)priv->bman_buf->rx_desc_base + priv->g_outaddr);//host memory having tx_irq and link state flags
+#if FSLU_NVME_INIC_DPAA2
+			priv->mem_pool_base=(priv->bman_buf->rx_desc_base + priv->g_outaddr+ 0x40);//host memory
+			priv->mem_pool_cur= priv->mem_pool_base;//host memory
+
+			/*fill the buffer pool once*/
+
+			if (dpaa2_dpbp_seed(priv, priv->dpbp_attrs.bpid)) {
+				printk("Buffer seeding failed for DPBP %d (bpid=%d)\n",priv->dpbp_dev->obj_desc.id, priv->dpbp_attrs.bpid);
+			}
+#endif
+			priv->bman_buf->pool_set=BD_MEM_FREE;
+		}
+#endif
+                //if(priv->bman_buf->pool_set==BD_MEM_READY || priv->bman_buf->pool_set==BD_MEM_FREE)
+                if(priv->bman_buf->pool_set==BD_MEM_FREE)
+                {
+
+		if(unlikely(cbd_read(&priv->flags_ptr->tx_irq_flag) == BD_IRQ_MASK))
+		{
+
+			if(unlikely(priv->bman_buf->iface_status == IFACE_UP)) {
+				schedule_work(&priv->net_start_work);
+				iowrite32(BD_IRQ_CLEAR,&priv->flags_ptr->tx_irq_flag);
+			} else if(unlikely(priv->bman_buf->iface_status  == IFACE_DOWN)) {
+				schedule_work(&priv->net_stop_work);
+				iowrite32(BD_IRQ_CLEAR,&priv->flags_ptr->tx_irq_flag);
+			}
+			else if(unlikely(priv->bman_buf->pull_rx_buffers==BP_PULL_SET)){
+
+				__dpaa2_dpbp_free(priv);
+				priv->bman_buf->pull_rx_buffers=BP_PULL_DONE;
+				iowrite32(BD_IRQ_CLEAR,&priv->flags_ptr->tx_irq_flag);
+
+			}
+			else if(napi_schedule_prep(&priv->napi)){
+				iowrite32(BD_IRQ_CLEAR,&priv->flags_ptr->tx_irq_flag);
+				__napi_schedule(&priv->napi);
+			}
+
+		}
+	}
+	msleep(1000);
+}
+return 0;
+}
+#endif /*FSLU_NVME_INIC*/
 
 static int __dpaa2_eth_pull_channel(struct dpaa2_eth_channel *ch)
 {
@@ -980,9 +2032,10 @@ static int dpaa2_eth_poll(struct napi_struct *napi, int budget)
 	__dpaa2_eth_pull_channel(ch);
 
 	do {
+#if !(FSLU_NVME_INIC)
 		/* Refill pool if appropriate */
 		dpaa2_dpbp_refill(priv, ch, priv->dpbp_attrs.bpid);
-
+#endif
 		store_cleaned = dpaa2_eth_store_consume(ch);
 		cleaned += store_cleaned;
 
@@ -1019,6 +2072,10 @@ static void dpaa2_eth_napi_enable(struct dpaa2_eth_priv *priv)
 		ch = priv->channel[i];
 		napi_enable(&ch->napi);
 	}
+#if FSLU_NVME_INIC
+	napi_enable(&priv->napi);
+#endif /* FSLU_NVME_INIC */
+
 }
 
 static void dpaa2_eth_napi_disable(struct dpaa2_eth_priv *priv)
@@ -1030,6 +2087,9 @@ static void dpaa2_eth_napi_disable(struct dpaa2_eth_priv *priv)
 		ch = priv->channel[i];
 		napi_disable(&ch->napi);
 	}
+#if FSLU_NVME_INIC
+	napi_disable(&priv->napi);
+#endif /* FSLU_NVME_INIC */
 }
 
 static int dpaa2_link_state_update(struct dpaa2_eth_priv *priv)
@@ -1052,19 +2112,93 @@ static int dpaa2_link_state_update(struct dpaa2_eth_priv *priv)
 	if (state.up) {
 		netif_carrier_on(priv->net_dev);
 		netif_tx_start_all_queues(priv->net_dev);
+#if FSLU_NVME_INIC
+		if((priv->interface_id >=0) && (priv->interface_id<NUM_NET_DEV))
+		{
+			cbd_write(&priv->flags_ptr->link_state_update,LINK_STATUS);
+			cbd_write(&priv->flags_ptr->link_state,LINK_STATE_UP);
+			//writeq((uint64_t)(LINK_STATUS|((uint64_t)LINK_STATE_UP<<32)),&(priv->flags_ptr->link_state_update));
+			generate_msi(priv);
+		}
+#endif
 	} else {
 		netif_tx_stop_all_queues(priv->net_dev);
 		netif_carrier_off(priv->net_dev);
+#if FSLU_NVME_INIC
+		if((priv->interface_id >=0) && (priv->interface_id<NUM_NET_DEV))
+		{
+			//writeq((uint64_t)(LINK_STATUS|((uint64_t)LINK_STATE_DOWN<<32)),&(priv->flags_ptr->link_state_update));
+			cbd_write(&priv->flags_ptr->link_state_update,LINK_STATUS);
+			cbd_write(&priv->flags_ptr->link_state,LINK_STATE_DOWN);
+			generate_msi(priv);
+		}
+#endif
 	}
 
 	netdev_info(priv->net_dev, "Link Event: state %s",
-		    state.up ? "up" : "down");
+			state.up ? "up" : "down");
 
 	return 0;
 }
 
+#if FSLU_NVME_INIC
+static void  nic_open(struct work_struct *work)
+{
+	struct dpaa2_eth_priv *priv = container_of(work, struct dpaa2_eth_priv,
+			net_start_work);
+	int err;
+
+	/* We'll only start the txqs when the link is actually ready; make sure
+	 * we don't race against the link up notification, which may come
+	 * immediately after dpni_enable();
+	 *
+	 * FIXME beware of race conditions
+	 */
+	/*reset all discriptors */
+	priv->cur_rx=priv->rx_base;
+	priv->cur_tx=priv->tx_base;
+#if FSLU_NVME_INIC_DPAA2
+	priv->cur_conf = priv->tx_base;
+#endif
+#if FSLU_NVME_INIC_QDMA
+priv->cur_tx_dma = priv->tx_base;
+#endif
+
+
+	netif_tx_stop_all_queues(priv->net_dev);
+
+
+	dpaa2_eth_napi_enable(priv);
+	err = dpni_enable(priv->mc_io,0, priv->mc_token);
+	if (err < 0) {
+		printk("dpni_enable() failed\n");
+	}
+
+	/* Set the maximum Rx frame length to match the transmit side;
+	 * account for L2 headers when computing the MFL
+	 */
+	err = dpni_set_max_frame_length(priv->mc_io,0, priv->mc_token,
+			(uint16_t)DPAA2_ETH_L2_MAX_FRM(MTU_INIC));
+	if (err) {
+		printk("PCIE:dpni_set_mfl() failed\n");
+
+	}
+
+	priv->net_dev->mtu = MTU_INIC;
+
+	priv->bman_buf->iface_status = IFACE_READY;
+	return;
+}
+
+#endif /* FSLU_NVME_INIC */
+
+
 static int dpaa2_eth_open(struct net_device *net_dev)
 {
+#if FSLU_NVME_INIC
+dump_stack();
+return 0;
+#else
 	struct dpaa2_eth_priv *priv = netdev_priv(net_dev);
 	int err;
 
@@ -1112,10 +2246,38 @@ enable_err:
 	dpaa2_eth_napi_disable(priv);
 	__dpaa2_dpbp_free(priv);
 	return err;
+#endif
 }
+
+#if FSLU_NVME_INIC
+static void nic_stop(struct work_struct *work)
+{
+	struct dpaa2_eth_priv *priv = container_of(work, struct dpaa2_eth_priv,
+			net_stop_work);
+	int err;
+
+	dpni_disable(priv->mc_io,0, priv->mc_token);
+
+	/* TOO: Make sure queues are drained before if down is complete! */
+	msleep(100);
+
+	dpaa2_eth_napi_disable(priv);
+	msleep(100);
+
+
+	priv->bman_buf->iface_status = IFACE_STOP;
+
+	return;
+}
+
+#endif /* FSLU_NVME_INIC */
+
 
 static int dpaa2_eth_stop(struct net_device *net_dev)
 {
+#if FSLU_NVME_INIC
+return 0;
+#else
 	struct dpaa2_eth_priv *priv = netdev_priv(net_dev);
 
 	/* Stop Tx and Rx traffic */
@@ -1129,7 +2291,7 @@ static int dpaa2_eth_stop(struct net_device *net_dev)
 	msleep(100);
 
 	__dpaa2_dpbp_free(priv);
-
+#endif
 	return 0;
 }
 
@@ -1157,10 +2319,16 @@ static int dpaa2_eth_init(struct net_device *net_dev)
 	net_dev->priv_flags &= ~not_supported;
 
 	/* Features */
+#if FSLU_NVME_INIC
+	net_dev->features = NETIF_F_RXCSUM |
+			    NETIF_F_IP_CSUM | NETIF_F_IPV6_CSUM |
+			    NETIF_F_SG | NETIF_F_HIGHDMA;
+#else
 	net_dev->features = NETIF_F_RXCSUM |
 			    NETIF_F_IP_CSUM | NETIF_F_IPV6_CSUM |
 			    NETIF_F_SG | NETIF_F_HIGHDMA |
 			    NETIF_F_LLTX;
+#endif
 	net_dev->hw_features = net_dev->features;
 
 	return 0;
@@ -1448,7 +2616,9 @@ static const struct net_device_ops dpaa2_eth_ops = {
 	.ndo_change_mtu = dpaa2_eth_change_mtu,
 	.ndo_set_rx_mode = dpaa2_eth_set_rx_mode,
 	.ndo_set_features = dpaa2_eth_set_features,
+#if !(FSLU_NVME_INIC)
 	.ndo_do_ioctl = dpaa2_eth_ioctl,
+#endif
 };
 
 static void dpaa2_eth_cdan_cb(struct dpaa2_io_notification_ctx *ctx)
@@ -1818,6 +2988,22 @@ static int dpaa2_dpbp_setup(struct dpaa2_eth_priv *priv)
 	err = check_obj_version(dpbp_dev, priv->dpbp_attrs.version.major);
 	if (err)
 		goto err_dpbp_ver;
+#if FSLU_NVME_INIC
+#if FSLU_NVME_INIC_QDMA/*implementing non blocking boot support*/
+if((if_count >=0) && (if_count< NUM_NET_DEV))
+{
+ err = dpaa2_dpbp_seed(priv, priv->dpbp_attrs.bpid);
+    if (err) {
+	    /* Not much to do; the buffer pool, though not filled up,
+	     * may still contain some buffers which would enable us
+	     * to limp on.
+	     */
+	    printk("Buffer seeding failed for DPBP\n");
+    }
+
+}
+#endif
+#endif
 
 	return 0;
 
@@ -2383,6 +3569,15 @@ static void dpaa2_eth_napi_add(struct dpaa2_eth_priv *priv)
 		netif_napi_add(priv->net_dev, &ch->napi, dpaa2_eth_poll,
 			       NAPI_POLL_WEIGHT);
 	}
+#if FSLU_NVME_INIC
+if((if_count >= 0) && (if_count < NUM_NET_DEV))
+{
+    netif_napi_add(priv->net_dev,&priv->napi, nic_tx_napi,NAPI_POLL_WEIGHT);
+}
+#endif /* FSLU_NVME_INIC */
+
+
+
 }
 
 static void dpaa2_eth_napi_del(struct dpaa2_eth_priv *priv)
@@ -2555,6 +3750,135 @@ static int dpaa2_eth_probe(struct fsl_mc_device *dpni_dev)
 
 	dev = &dpni_dev->dev;
 
+#if FSLU_NVME_INIC
+	if(if_count == 0 ) {
+		//printk("Registered one network interface and doing all global init- %d\n", if_count);
+		int ret;
+		/*INBOUND AND OUTBOUND PCIE MAPPING*/
+		global->pci_config = (uint64_t)ioremap_nocache(PEX3,0xfffff);
+		if (!global->pci_config) {
+			printk("PEX3 iormap failed\n");
+			return -ENOMEM;
+		}
+
+
+		iowrite32(0x1, (global->pci_config + 0x8bc));/*enable read write*/
+		iowrite32(0x0, (global->pci_config + 0x807f8));/*PF's related*/
+
+/*outbound mapings moved to u-boot level*/
+#if 0
+		/*outbound of whole x86 RAM 4GB*/
+		iowrite32(0x00000002, (global->pci_config + 0x900));/*set outbound region2 as current region*/
+		iowrite32(0x00000000, (global->pci_config + 0x90c));/*set lower  address*/
+		iowrite32(0x00000014, (global->pci_config + 0x910));/*set  upper address*/
+		iowrite32(0xffffffff, (global->pci_config + 0x914));/*limit*/
+		iowrite32(0x00000000,(global->pci_config + 0x918));/*target lower address*/
+		iowrite32(0x00000000,(global->pci_config + 0x91c));/*target upper address*/
+		iowrite32(0x00000000,(global->pci_config + 0x904));/*ctrl_reg mem region*/
+		iowrite32(0x80000000,(global->pci_config + 0x908));/*enable address match mode*/
+
+		/*outbound of whole x86 RAM  second 4GB*/
+		iowrite32(0x00000000, (global->pci_config + 0x900));
+		iowrite32(0x00000000, (global->pci_config + 0x90c));
+		iowrite32(0x00000015, (global->pci_config + 0x910));
+		iowrite32(0xffffffff, (global->pci_config + 0x914));
+		iowrite32(0x00000000,(global->pci_config + 0x918));
+		iowrite32(0x00000001,(global->pci_config + 0x91c));
+		iowrite32(0x00000000,(global->pci_config + 0x904));
+		iowrite32(0x80000000,(global->pci_config + 0x908));
+#endif
+
+		iowrite32(0x80000000, (global->pci_config + 0x900));
+		iowrite32(0x08000000, (global->pci_config + 0x918));
+		iowrite32(0x00000000, (global->pci_config + 0x91c));
+		iowrite32(0x00100000, (global->pci_config + 0x904));
+		iowrite32(0xc0080000,(global->pci_config + 0x908));
+
+		global->dma_virt = (uint64_t)dma_alloc_coherent(dev,SHARED_CONF_SIZE,&global->dma_handle,GFP_KERNEL);
+		if(!global->dma_virt) {
+			printk("PCIE:DMA alloc failed \n");
+			err= -ENOMEM;
+			goto err_dma_alloc;
+		}
+		memset(global->dma_virt, 0, SHARED_CONF_SIZE);
+		global->dma_bkp = global->dma_handle;
+		global->dma_handle = PTR_ALIGN(global->dma_handle,0x4000000);
+		printk("PCIE:dma align address %p \n",global->dma_handle);
+		global->dma_virt = (void*) ((unsigned long) (global->dma_virt) + (global->dma_handle - global->dma_bkp));
+
+		iowrite32(0x80000002, (global->pci_config + 0x900));
+		iowrite32((global->dma_handle & 0xffffffff), (global->pci_config + 0x918));
+		iowrite32((global->dma_handle >> 32), (global->pci_config + 0x91c));
+		iowrite32(0x00100000, (global->pci_config + 0x904));
+		iowrite32(0xc0080200,(global->pci_config + 0x908));
+
+		global->dreg_config = (uint64_t)ioremap_nocache(0x08000000,0x400000);
+		if (!global->dreg_config) {
+			printk("PCIE: DMA ioremap failed\n");
+			err =-ENOMEM;
+			goto err_ccsr_ioremap;
+		}
+
+		global->pci_outbound=(uint64_t)ioremap_nocache(0x1400000000,0x1ffffffff);
+		if (!global->pci_outbound) {
+			printk("PEX3 iormap failed\n");
+			err= -ENOMEM;
+			goto err_outbound_ioremap;
+		}
+#if   FSLU_NVME_INIC
+//#if FSLU_NVME_INIC_DPAA2
+//#if FSLU_NVME_INIC_QDMA_IRQ
+#if 0/*trying to elimnate dummy qdma interrupt*/
+		ret = request_irq(17,nic_irq_handler,0,"NIC COMMON IRQ",global);
+		if (ret) {
+			err=ret;
+			printk("PCIE:Unable to register irq handler\n");
+			goto err_register_irq;
+		}
+		ret=irq_set_affinity(17,cpumask_of(7));
+		if(ret<0){
+			printk("PCIE:Unable to set smp affinity \n");
+		}
+
+#endif
+//#endif
+//#endif
+#endif
+		global->dma_netreg = global->dma_virt;
+#if FSLU_NVME_INIC_QDMA
+		/* qdma engine channel relted registrations*/
+		dma_cap_mask_t mask;
+		dma_cap_zero(mask);
+		dma_cap_set(DMA_MEMCPY, mask);
+		global->dma_chan = dma_request_channel(mask, NULL, NULL);
+		if(!global->dma_chan)
+		{
+                 //TODO
+			printk("qdma-client unbale to get channel use cpu memcpy \n");
+			return -ENOMEM;
+		}
+		global->dma_device = global->dma_chan->device;
+		//printk("PCIE:%s qdma channel name %s \n",__func__,dma_chan_name(global->dma_chan));
+		if(global->dma_device->copy_align)
+		{
+                  // TODO
+			printk("qdma-client alignment required align before starting dma transaction\n");
+			return -ENOMEM;
+		}
+
+#endif/*FSLU_NVME_INIC_QDMA*/
+
+
+	}
+#endif
+#if FSLU_NVME_INIC
+	int timeout=0;
+	struct buf_pool_desc *bman_pool = NULL;
+	int ret1;
+#endif /* FSLU_NVME_INIC */
+
+
+
 	/* Net device */
 	net_dev = alloc_etherdev_mq(sizeof(*priv), DPAA2_ETH_MAX_TX_QUEUES);
 	if (!net_dev) {
@@ -2599,6 +3923,97 @@ static int dpaa2_eth_probe(struct fsl_mc_device *dpni_dev)
 	dpaa2_eth_setup_fqs(priv);
 	dpaa2_set_fq_affinity(priv);
 
+#if FSLU_NVME_INIC
+		priv->interface_id = if_count;
+if((if_count >= 0) && (if_count < NUM_NET_DEV))
+	{
+/*dummy qdma*/
+		priv->poll_host = kthread_create(inic_poll_host_work,(void *)priv,"interface ni%d thread",dpni_dev->obj_desc.id);
+		kthread_bind(priv->poll_host,(dpni_dev->obj_desc.id+3));
+
+#if 0
+#if FSLU_NVME_INIC_QDMA
+		/* using kthread since we can't share qdma interrupts with legacy mode */
+
+		priv->poll_host = kthread_create(inic_poll_host_work,(void *)priv,"interface ni%d thread",dpni_dev->obj_desc.id);
+		kthread_bind(priv->poll_host,(dpni_dev->obj_desc.id+3));
+		//printk("PCIE:%s kthread created and bind to core %d\n",__func__,(dpni_dev->obj_desc.id+3));
+#endif
+#endif
+
+#if FSLU_NVME_INIC_FPGA_IRQ
+		struct of_phandle_args irq_data;
+		static struct device_node *nic_of_genirq_node;
+		if (!nic_of_genirq_node)
+			nic_of_genirq_node = of_find_matching_node(NULL, nic_of_genirq_match);
+
+		if (WARN_ON(!nic_of_genirq_node)){
+			printk("node WARN\n");
+			return -1;
+		}
+		memset(&irq_data,0,sizeof(irq_data));
+		irq_data.np = nic_of_genirq_node;
+		irq_data.args_count = 3;
+		irq_data.args[0] = 0;
+		irq_data.args[1] = ((irq_start+if_count) - 32);
+		irq_data.args[2] = IRQ_TYPE_EDGE_RISING;
+
+		priv->fpga_irq = irq_create_of_mapping(&irq_data);
+		if (WARN_ON(!priv->fpga_irq)){
+			printk("mapping WARN\n");
+			priv->fpga_irq = (irq_start+if_count);
+		}
+		snprintf(priv->tx_name, sizeof(priv->tx_name) - 1,"INIC TX IRQ%d", if_count);
+		ret1 = request_irq(priv->fpga_irq,nic_irq_handler,0,priv->tx_name,priv);
+		if (ret1) {
+			err=ret1;
+			printk("PCIE:Unable to register irq handler for interafce %d \n",if_count);
+			goto err_register_irq;
+		}
+#endif
+		/*VVDN init TX/RX BD and BMAN BD */
+		priv->netregs =global->dma_netreg + (INTERFACE_REG * if_count);
+		priv->g_outaddr=global->pci_outbound;
+		priv->tx_base = priv->netregs + PCINET_TXBD_BASE ;
+		priv->bman_buf =priv->netregs;
+		bman_pool=priv->bman_buf;
+		priv->g_ccsr=global->pci_config;
+		priv->fpga_reg = global->dreg_config;
+
+#if FSLU_NVME_INIC_QDMA
+//printk("PCIE:%s allocating tx buffers\n",__func__);
+		int i;
+                void *buf_addr;
+		priv->tx_buf_count=0;
+                priv->rx_buf_count=0;
+                priv->tx_buf_ready=0;
+                priv->tx_buf_free=0;
+                priv->tx_buf_dma=0;
+/*qdma store in priv structure can be used individual port requirment*/
+                priv->dma_chan=global->dma_chan;
+                priv->dma_device=global->dma_device;
+		for(i=0;i<DPAA2_ETH_NUM_TX_BUFS;i++)
+		{
+                        priv->tx_buf[priv->tx_buf_count]=kzalloc(sizeof(struct tx_buf_desc),GFP_KERNEL);
+
+			buf_addr= napi_alloc_frag(DPAA2_ETH_BUF_RAW_SIZE);
+			if (unlikely(!buf_addr)) {
+				printk("PCIE: %s buffer allocation failed\n",__func__);
+			}
+
+			buf_addr = PTR_ALIGN(buf_addr, DPAA2_ETH_TX_BUF_ALIGN);
+                        priv->tx_buf[priv->tx_buf_count]->addr = virt_to_phys(buf_addr);
+/* store physical address of tx buffers since we are handling physical only in tx_napi and tx_conform*/
+			priv->tx_buf[priv->tx_buf_count++]->flag = BD_MEM_READY;
+
+		}
+#endif/*FSLU_NVME_INIC_QDMA*/
+}
+#endif/*FSLU_NVME_INIC*/
+
+
+
+
 	/* DPBP */
 	err = dpaa2_dpbp_setup(priv);
 	if (err)
@@ -2638,6 +4053,23 @@ static int dpaa2_eth_probe(struct fsl_mc_device *dpni_dev)
 	if (err)
 		goto err_netdev_init;
 
+#if FSLU_NVME_INIC
+/*add the hw mac address in LS2 bar2*/
+if((if_count >= 0) && (if_count < NUM_NET_DEV))
+	{
+                bman_pool->obj_id= dpni_dev->obj_desc.id;
+		bman_pool->mac_id[0] = priv->net_dev->dev_addr[0];
+		bman_pool->mac_id[1] = priv->net_dev->dev_addr[1];
+		bman_pool->mac_id[2] = priv->net_dev->dev_addr[2];
+		bman_pool->mac_id[3] = priv->net_dev->dev_addr[3];
+		bman_pool->mac_id[4] = priv->net_dev->dev_addr[4];
+		bman_pool->mac_id[5] = priv->net_dev->dev_addr[5];
+		bman_pool->mac_id[6] = MAC_SET;
+	}
+#endif /* FSLU_NVME_INIC */
+
+
+
 	/* Configure checksum offload based on current interface flags */
 	err = dpaa2_eth_set_rx_csum(priv,
 				    !!(net_dev->features & NETIF_F_RXCSUM));
@@ -2666,6 +4098,46 @@ static int dpaa2_eth_probe(struct fsl_mc_device *dpni_dev)
 		goto err_setup_irqs;
 	}
 #endif
+
+#if FSLU_NVME_INIC
+if((if_count >= 0) && (if_count < NUM_NET_DEV))
+	{
+
+
+		bman_pool->tx_data_offset =priv->tx_data_offset;
+		bman_pool->tx_irq = BD_IRQ_CLEAR;//moved to host memory need to remove
+		bman_pool->iface_status = IFACE_IDLE;
+		bman_pool->bpid = priv->dpbp_attrs.bpid;
+		priv->msix_addr = ((uint64_t)global->pci_config+0x948);//requires host handshake but generate msix only after handshake
+		priv->msix_value =if_count + 0x1000000;//requires host handshake
+		/*initialiaze locks */
+		spin_lock_init(&priv->tx_desc_lock);
+		spin_lock_init(&priv->tx_share_lock);
+		spin_lock_init(&priv->rx_desc_lock);
+		spin_lock_init(&priv->tx_conf_lock);
+#if FSLU_NVME_INIC_QDMA
+spin_lock_init(&priv->rx_dma_lock);
+#endif
+		/*initialize WORK queue */
+		INIT_WORK(&priv->net_start_work, nic_open);
+		INIT_WORK(&priv->net_stop_work, nic_stop);
+		/*store priv members in global memory can be accesed from common irq or other place*/
+	global->priv[if_count]=(uint64_t)priv;
+#if 0
+#if FSLU_NVME_INIC_QDMA
+//printk("PCIE:%s strating kthread \n ",__func__);
+
+		wake_up_process(priv->poll_host);/*starting kthread */
+#endif
+#endif
+/*dummy qdma*/
+		wake_up_process(priv->poll_host);/*starting kthread */
+	}
+if_count++;
+
+#endif /* FSLU_NVME_INIC */
+
+
 
 	dpaa2_eth_sysfs_init(&net_dev->dev);
 	dpaa2_dbg_add(priv);
@@ -2702,6 +4174,17 @@ err_irqs_alloc:
 err_portal_alloc:
 	dev_set_drvdata(dev, NULL);
 	free_netdev(net_dev);
+#if FSLU_NVME_INIC
+err_register_irq:
+	iounmap(global->pci_outbound);
+err_outbound_ioremap:
+	iounmap(global->dreg_config);
+err_ccsr_ioremap:
+	global->dma_virt = (void*) ((unsigned long) (global->dma_virt) - (global->dma_handle - global->dma_bkp));
+	dma_free_coherent(dev,SHARED_CONF_SIZE,global->dma_virt,global->dma_handle);
+err_dma_alloc:
+	iounmap(global->pci_config);
+#endif
 
 	return err;
 }

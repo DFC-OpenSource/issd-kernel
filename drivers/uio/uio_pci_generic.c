@@ -41,6 +41,7 @@
 #include <linux/irqdomain.h>
 #include <linux/of_irq.h>
 #include <linux/platform_device.h>
+#include <inic_config.h>
 
 #define DRIVER_VERSION	"0.02.0"
 #define DRIVER_AUTHOR	"Michael S. Tsirkin <mst@redhat.com>"
@@ -68,6 +69,7 @@
 #define TARGET_ADD_HIGH         0x91c
 
 static char pci_num = 0;
+static char pci_num_check = 0;
 static unsigned long long int phy_add[MEMALLOC_4MB];
 static void *v_add[MEMALLOC_4MB];
 static dev_t dev;
