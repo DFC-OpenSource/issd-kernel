@@ -81,6 +81,7 @@ static inline bool vchan_issue_pending(struct virt_dma_chan *vc)
  *
  * vc.lock must be held by caller
  */
+void vchan_complete_nolock(unsigned long arg); //prototype
 static inline void vchan_cookie_complete(struct virt_dma_desc *vd)
 {
 	struct virt_dma_chan *vc = to_virt_chan(vd->tx.chan);
@@ -93,6 +94,21 @@ static inline void vchan_cookie_complete(struct virt_dma_desc *vd)
 	list_add_tail(&vd->node, &vc->desc_completed);
 
 	tasklet_schedule(&vc->task);
+}
+
+static inline void vchan_cookie_complete_for_qdma(struct virt_dma_desc *vd)
+{
+	struct virt_dma_chan *vc = to_virt_chan(vd->tx.chan);
+	dma_cookie_t cookie;
+
+	cookie = vd->tx.cookie;
+	dma_cookie_complete(&vd->tx);
+	dev_vdbg(vc->chan.device->dev, "txd %p[%x]: marked complete\n",
+			vd, cookie);
+	list_add_tail(&vd->node, &vc->desc_completed);
+
+	vchan_complete_nolock(vc);
+
 }
 
 /**

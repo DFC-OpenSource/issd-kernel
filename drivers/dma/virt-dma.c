@@ -91,6 +91,43 @@ static void vchan_complete(unsigned long arg)
 	}
 }
 
+void vchan_complete_nolock(unsigned long arg)
+{
+	struct virt_dma_chan *vc = (struct virt_dma_chan *)arg;
+	struct virt_dma_desc *vd;
+	dma_async_tx_callback cb = NULL;
+	void *cb_data = NULL;
+	struct list_head *test;
+	LIST_HEAD(head);
+
+	list_splice_tail_init(&vc->desc_completed, &head);
+	vd = vc->cyclic;
+	if (vd) {
+		vc->cyclic = NULL;
+		cb = vd->tx.callback;
+		cb_data = vd->tx.callback_param;
+	}
+
+	if (cb)
+		cb(cb_data);
+
+	while (!list_empty(&head)) {
+		vd = list_first_entry(&head, struct virt_dma_desc, node);
+		cb = vd->tx.callback;
+		cb_data = vd->tx.callback_param;
+
+		list_del(&vd->node);
+
+
+		vc->desc_free(vd);
+
+		if (cb)
+			cb(cb_data);
+	}
+
+}
+EXPORT_SYMBOL_GPL(vchan_complete_nolock);
+
 void vchan_dma_desc_free_list(struct virt_dma_chan *vc, struct list_head *head)
 {
 	while (!list_empty(head)) {
