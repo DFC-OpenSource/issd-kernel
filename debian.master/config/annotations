@@ -340,7 +340,7 @@ CONFIG_HW_RANDOM_ATMEL				n note<depends on CONFIG_ARCH_AT91SAM9G45>
 # Menu: Device Drivers >> Character devices >> IPMI top-level message handler
 #CONFIG_IPMI_HANDLER				y
 CONFIG_IPMI_PANIC_EVENT				n
-CONFIG_IPMI_SI_PROBE_DEFAULTS			p policy<(arch armhf arm64 &/ value n) | value y> note<Probing for a BMC in I/O space is not supported on ARM and can cause various faults.>
+CONFIG_IPMI_SI_PROBE_DEFAULTS			y
 
 # Menu: Device Drivers >> Character devices >> PCMCIA character devices
 
@@ -375,7 +375,6 @@ CONFIG_SERIAL_8250_NR_UARTS			48
 CONFIG_SERIAL_8250_RUNTIME_UARTS		32
 CONFIG_SERIAL_8250_EM				n
 CONFIG_SERIAL_8250_MT6577			y
-CONFIG_SERIAL_8250_DW				p policy<(arch arm64 &/ value y) | value m> note<Otherwise can't boot APM xgene2 via UEFI+ACPI>
 
 # Menu: Device Drivers >> Character devices >> Serial drivers >> 8250/16550 and compatible serial support >> Extended 8250/16550 serial driver options
 CONFIG_SERIAL_8250_EXTENDED			y
@@ -1030,7 +1029,7 @@ CONFIG_LEDS_ASIC3				y
 CONFIG_LEDS_SYSCON				y
 
 # Menu: Device Drivers >> LED Support >> LED Class Support >> LED Trigger support
-CONFIG_LEDS_TRIGGER_HEARTBEAT			p mark<ENFORCED> policy<{'armhf': 'y', '*': 'm'}>
+#CONFIG_LEDS_TRIGGER_HEARTBEAT p policy<(arch armel armhf &/ value y) | value m> note<enables early heartbeat LEDs>
 CONFIG_LEDS_TRIGGERS				y
 CONFIG_LEDS_TRIGGER_CPU				y
 
@@ -1822,7 +1821,7 @@ CONFIG_RTC_DRV_TWL4030				p policy<{'armhf': 'y', '*': 'm'}> note<boot essential
 CONFIG_RTC_DRV_OMAP				p policy<{'armhf': 'y', '*': 'm'}>
 CONFIG_RTC_DRV_S3C				p policy<{'armhf': 'y', '*': 'm'}>
 CONFIG_RTC_DRV_PL031				p policy<{'armhf': 'y', '*': 'm'}>
-CONFIG_RTC_DRV_XGENE				p policy<{'arm64': 'y', '*': 'n'}>
+CONFIG_RTC_DRV_XGENE				p policy<{'amd64': 'y', '*': 'm'}>
 CONFIG_RTC_DRV_DS1374_WDT			y
 CONFIG_RTC_DRV_PCF8523				p policy<{'armhf-generic': 'y', '*': 'm'}>
 CONFIG_RTC_DRV_OPAL				p policy<{'powerpc-powerpc64-smp': 'y', 'ppc64el-generic': 'y'}>
@@ -2892,7 +2891,7 @@ CONFIG_TREE_RCU                                 p policy<{'amd64-generic': 'y', 
 CONFIG_PREEMPT_RCU                              p policy<{'amd64-lowlatency': 'y', 'i386-lowlatency': 'y'}>
 
 # Menu: General setup >> Stack Protector buffer overflow detection
-CONFIG_CC_STACKPROTECTOR_STRONG			p mark<ENFORCED> policy<{'powerpc': '-', 'ppc64el': '-', '*': 'y'}>
+CONFIG_CC_STACKPROTECTOR_REGULAR		p mark<ENFORCED> policy<{'powerpc': '-', 'ppc64el': '-', '*': 'y'}>
 
 # Menu: General setup >> Stack Protector buffer overflow detection >> Architecture: arm
 
@@ -2917,7 +2916,7 @@ CONFIG_PANIC_TIMEOUT				0
 CONFIG_STACKTRACE				y
 CONFIG_PROVIDE_OHCI1394_DMA_INIT		n
 CONFIG_STRICT_DEVMEM				y mark<ENFORCED>
-CONFIG_DEBUG_RODATA				p mark<ENFORCED> policy<{'amd64': 'y', 'i386': 'y', 'arm64': 'y', 'armhf': 'y'}>
+CONFIG_DEBUG_RODATA				p mark<ENFORCED> policy<{'amd64': 'y', 'i386': 'y', 'arm64': 'y'}>
 CONFIG_DEBUG_SET_MODULE_RONX			p mark<ENFORCED> policy<{'powerpc': '-', 'ppc64el': '-', '*': 'y'}>
 CONFIG_EARLY_PRINTK				y
 CONFIG_DEBUG_RODATA				p policy<{'amd64': 'y', 'i386': 'y', 'armhf': 'y'}>
@@ -3515,7 +3514,6 @@ CONFIG_APM_ALLOW_INTS				n
 
 # Menu: Power management and ACPI options >> Architecture: powerpc
 CONFIG_PPC_POWERNV				p policy<{'powerpc': 'y', 'ppc64el': 'y'}>
-CONFIG_PPC_POWERNV_RTAS				p policy<{'powerpc': 'y', 'ppc64el': 'y'}>
 CONFIG_PPC_CHRP					p policy<{'powerpc': 'y'}>
 CONFIG_PPC_PMAC					p policy<{'powerpc': 'y', 'ppc64el': 'n'}>
 CONFIG_PPC_PMAC32_PSURGE			p policy<{'powerpc': 'y'}>
@@ -3842,7 +3840,7 @@ CONFIG_MTRR_SANITIZER_SPARE_REG_NR_DEFAULT      p policy<{'amd64': '1', 'i386': 
 CONFIG_X86_PAT                                  p policy<{'amd64': 'y', 'i386': 'y'}>
 CONFIG_ARCH_RANDOM                              p policy<{'amd64': 'y', 'i386': 'y', 'powerpc-powerpc64-emb': 'n', 'powerpc-powerpc64-smp': 'y', 'powerpc-powerpc-e500mc': 'n', 'powerpc-powerpc-smp': 'n', 'ppc64el': 'y'}>
 CONFIG_X86_SMAP                                 p policy<{'amd64': 'y', 'i386': 'y'}>
-CONFIG_X86_INTEL_MPX                            p policy<{'amd64': 'y', 'i386': 'y'}>
+CONFIG_X86_INTEL_MPX                            p policy<{'amd64': 'n', 'i386': 'n'}>
 CONFIG_EFI                                      p policy<{'amd64': 'y', 'arm64': 'y', 'i386': 'y'}>
 CONFIG_EFI_STUB                                 p policy<{'amd64': 'y', 'arm64': 'y', 'i386': 'y'}>
 CONFIG_EFI_MIXED                                p policy<{'amd64': 'y'}>
@@ -4405,6 +4403,7 @@ CONFIG_LGUEST					n
 
 # Menu: Virtualization >> Architecture: arm
 CONFIG_KVM_ARM_HOST                             p policy<{'arm64': 'y', 'armhf-generic-lpae': 'y'}>
+CONFIG_KVM_ARM_MAX_VCPUS                        p policy<{'arm64': '4', 'armhf-generic-lpae': '4'}>
 CONFIG_KVM_ARM_VGIC                             p policy<{'arm64': 'y', 'armhf-generic-lpae': 'y'}>
 CONFIG_KVM_ARM_TIMER                            p policy<{'arm64': 'y', 'armhf-generic-lpae': 'y'}>
 
