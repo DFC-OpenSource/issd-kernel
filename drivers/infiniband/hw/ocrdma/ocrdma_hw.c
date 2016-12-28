@@ -933,18 +933,12 @@ static irqreturn_t ocrdma_irq_handler(int irq, void *handle)
 	struct ocrdma_eqe eqe;
 	struct ocrdma_eqe *ptr;
 	u16 cq_id;
-	u8 mcode;
 	int budget = eq->cq_cnt;
 
 	do {
 		ptr = ocrdma_get_eqe(eq);
 		eqe = *ptr;
 		ocrdma_le32_to_cpu(&eqe, sizeof(eqe));
-		mcode = (eqe.id_valid & OCRDMA_EQE_MAJOR_CODE_MASK)
-				>> OCRDMA_EQE_MAJOR_CODE_SHIFT;
-		if (mcode == OCRDMA_MAJOR_CODE_SENTINAL)
-			pr_err("EQ full on eqid = 0x%x, eqe = 0x%x\n",
-			       eq->q.id, eqe.id_valid);
 		if ((eqe.id_valid & OCRDMA_EQE_VALID_MASK) == 0)
 			break;
 
@@ -1118,6 +1112,9 @@ static void ocrdma_get_attr(struct ocrdma_dev *dev,
 	attr->local_ca_ack_delay = (rsp->max_pd_ca_ack_delay &
 				    OCRDMA_MBX_QUERY_CFG_CA_ACK_DELAY_MASK) >>
 	    OCRDMA_MBX_QUERY_CFG_CA_ACK_DELAY_SHIFT;
+	attr->roce_flags = (rsp->max_pd_ca_ack_delay &
+				OCRDMA_MBX_QUERY_CFG_L3_TYPE_MASK) >>
+				OCRDMA_MBX_QUERY_CFG_L3_TYPE_SHIFT;
 	attr->max_mw = rsp->max_mw;
 	attr->max_mr = rsp->max_mr;
 	attr->max_mr_size = ((u64)rsp->max_mr_size_hi << 32) |
@@ -1440,30 +1437,27 @@ static int ocrdma_mbx_alloc_pd_range(struct ocrdma_dev *dev)
 	struct ocrdma_alloc_pd_range_rsp *rsp;
 
 	/* Pre allocate the DPP PDs */
-	if (dev->attr.max_dpp_pds) {
-		cmd = ocrdma_init_emb_mqe(OCRDMA_CMD_ALLOC_PD_RANGE,
-					  sizeof(*cmd));
-		if (!cmd)
-			return -ENOMEM;
-		cmd->pd_count = dev->attr.max_dpp_pds;
-		cmd->enable_dpp_rsvd |= OCRDMA_ALLOC_PD_ENABLE_DPP;
-		status = ocrdma_mbx_cmd(dev, (struct ocrdma_mqe *)cmd);
-		rsp = (struct ocrdma_alloc_pd_range_rsp *)cmd;
+	cmd = ocrdma_init_emb_mqe(OCRDMA_CMD_ALLOC_PD_RANGE, sizeof(*cmd));
+	if (!cmd)
+		return -ENOMEM;
+	cmd->pd_count = dev->attr.max_dpp_pds;
+	cmd->enable_dpp_rsvd |= OCRDMA_ALLOC_PD_ENABLE_DPP;
+	status = ocrdma_mbx_cmd(dev, (struct ocrdma_mqe *)cmd);
+	if (status)
+		goto mbx_err;
+	rsp = (struct ocrdma_alloc_pd_range_rsp *)cmd;
 
-		if (!status && (rsp->dpp_page_pdid & OCRDMA_ALLOC_PD_RSP_DPP) &&
-		    rsp->pd_count) {
-			dev->pd_mgr->dpp_page_index = rsp->dpp_page_pdid >>
-					OCRDMA_ALLOC_PD_RSP_DPP_PAGE_SHIFT;
-			dev->pd_mgr->pd_dpp_start = rsp->dpp_page_pdid &
-					OCRDMA_ALLOC_PD_RNG_RSP_START_PDID_MASK;
-			dev->pd_mgr->max_dpp_pd = rsp->pd_count;
-			pd_bitmap_size =
-				BITS_TO_LONGS(rsp->pd_count) * sizeof(long);
-			dev->pd_mgr->pd_dpp_bitmap = kzalloc(pd_bitmap_size,
-							     GFP_KERNEL);
-		}
-		kfree(cmd);
+	if ((rsp->dpp_page_pdid & OCRDMA_ALLOC_PD_RSP_DPP) && rsp->pd_count) {
+		dev->pd_mgr->dpp_page_index = rsp->dpp_page_pdid >>
+				OCRDMA_ALLOC_PD_RSP_DPP_PAGE_SHIFT;
+		dev->pd_mgr->pd_dpp_start = rsp->dpp_page_pdid &
+				OCRDMA_ALLOC_PD_RNG_RSP_START_PDID_MASK;
+		dev->pd_mgr->max_dpp_pd = rsp->pd_count;
+		pd_bitmap_size = BITS_TO_LONGS(rsp->pd_count) * sizeof(long);
+		dev->pd_mgr->pd_dpp_bitmap = kzalloc(pd_bitmap_size,
+						     GFP_KERNEL);
 	}
+	kfree(cmd);
 
 	cmd = ocrdma_init_emb_mqe(OCRDMA_CMD_ALLOC_PD_RANGE, sizeof(*cmd));
 	if (!cmd)
@@ -1471,8 +1465,10 @@ static int ocrdma_mbx_alloc_pd_range(struct ocrdma_dev *dev)
 
 	cmd->pd_count = dev->attr.max_pd - dev->attr.max_dpp_pds;
 	status = ocrdma_mbx_cmd(dev, (struct ocrdma_mqe *)cmd);
+	if (status)
+		goto mbx_err;
 	rsp = (struct ocrdma_alloc_pd_range_rsp *)cmd;
-	if (!status && rsp->pd_count) {
+	if (rsp->pd_count) {
 		dev->pd_mgr->pd_norm_start = rsp->dpp_page_pdid &
 					OCRDMA_ALLOC_PD_RNG_RSP_START_PDID_MASK;
 		dev->pd_mgr->max_normal_pd = rsp->pd_count;
@@ -1480,13 +1476,15 @@ static int ocrdma_mbx_alloc_pd_range(struct ocrdma_dev *dev)
 		dev->pd_mgr->pd_norm_bitmap = kzalloc(pd_bitmap_size,
 						      GFP_KERNEL);
 	}
-	kfree(cmd);
 
 	if (dev->pd_mgr->pd_norm_bitmap || dev->pd_mgr->pd_dpp_bitmap) {
 		/* Enable PD resource manager */
 		dev->pd_mgr->pd_prealloc_valid = true;
-		return 0;
+	} else {
+		return -ENOMEM;
 	}
+mbx_err:
+	kfree(cmd);
 	return status;
 }
 
@@ -2411,7 +2409,7 @@ int ocrdma_mbx_query_qp(struct ocrdma_dev *dev, struct ocrdma_qp *qp,
 	struct ocrdma_query_qp *cmd;
 	struct ocrdma_query_qp_rsp *rsp;
 
-	cmd = ocrdma_init_emb_mqe(OCRDMA_CMD_QUERY_QP, sizeof(*rsp));
+	cmd = ocrdma_init_emb_mqe(OCRDMA_CMD_QUERY_QP, sizeof(*cmd));
 	if (!cmd)
 		return status;
 	cmd->qp_id = qp->id;
@@ -2433,8 +2431,15 @@ static int ocrdma_set_av_params(struct ocrdma_qp *qp,
 	int status;
 	struct ib_ah_attr *ah_attr = &attrs->ah_attr;
 	union ib_gid sgid, zgid;
-	u32 vlan_id = 0xFFFF;
-	u8 mac_addr[6];
+	struct ib_gid_attr sgid_attr;
+	u32 vlan_id = 0xffff;
+	u8 mac_addr[6], hdr_type;
+	union {
+		struct sockaddr     _sockaddr;
+		struct sockaddr_in  _sockaddr_in;
+		struct sockaddr_in6 _sockaddr_in6;
+	} sgid_addr, dgid_addr;
+
 	struct ocrdma_dev *dev = get_ocrdma_dev(qp->ibqp.device);
 
 	if ((ah_attr->ah_flags & IB_AH_GRH) == 0)
@@ -2449,12 +2454,19 @@ static int ocrdma_set_av_params(struct ocrdma_qp *qp,
 	cmd->params.hop_lmt_rq_psn |=
 	    (ah_attr->grh.hop_limit << OCRDMA_QP_PARAMS_HOP_LMT_SHIFT);
 	cmd->flags |= OCRDMA_QP_PARA_FLOW_LBL_VALID;
+
+	/* GIDs */
 	memcpy(&cmd->params.dgid[0], &ah_attr->grh.dgid.raw[0],
 	       sizeof(cmd->params.dgid));
-	status = ocrdma_query_gid(&dev->ibdev, 1,
-			ah_attr->grh.sgid_index, &sgid);
-	if (status)
-		return status;
+
+	rcu_read_lock();
+	status = ib_get_cached_gid(&dev->ibdev, 1, ah_attr->grh.sgid_index,
+				   &sgid, &sgid_attr);
+	if (!status) {
+		vlan_id = rdma_vlan_dev_vlan_id(sgid_attr.ndev);
+		memcpy(mac_addr, sgid_attr.ndev->dev_addr, ETH_ALEN);
+	}
+	rcu_read_unlock();
 
 	memset(&zgid, 0, sizeof(zgid));
 	if (!memcmp(&sgid, &zgid, sizeof(zgid)))
@@ -2467,20 +2479,23 @@ static int ocrdma_set_av_params(struct ocrdma_qp *qp,
 		return status;
 	cmd->params.dmac_b0_to_b3 = mac_addr[0] | (mac_addr[1] << 8) |
 				(mac_addr[2] << 16) | (mac_addr[3] << 24);
+	hdr_type = ib_gid_to_network_type(sgid_attr.gid_type, &sgid);
+	if (hdr_type == RDMA_NETWORK_IPV4) {
+		status = rdma_gid2ip(&sgid_addr._sockaddr, &sgid);
+		if (status)
+			return status;
+		status = rdma_gid2ip(&dgid_addr._sockaddr, &ah_attr->grh.dgid);
+		if (status)
+			return status;
+		memcpy(&cmd->params.dgid[0],
+		       &dgid_addr._sockaddr_in.sin_addr.s_addr, 4);
+		memcpy(&cmd->params.sgid[0],
+		       &sgid_addr._sockaddr_in.sin_addr.s_addr, 4);
+	}
 	/* convert them to LE format. */
 	ocrdma_cpu_to_le32(&cmd->params.dgid[0], sizeof(cmd->params.dgid));
 	ocrdma_cpu_to_le32(&cmd->params.sgid[0], sizeof(cmd->params.sgid));
 	cmd->params.vlan_dmac_b4_to_b5 = mac_addr[4] | (mac_addr[5] << 8);
-	if (attr_mask & IB_QP_VID) {
-		vlan_id = attrs->vlan_id;
-	} else if (dev->pfc_state) {
-		vlan_id = 0;
-		pr_err("ocrdma%d:Using VLAN with PFC is recommended\n",
-			dev->id);
-		pr_err("ocrdma%d:Using VLAN 0 for this connection\n",
-			dev->id);
-	}
-
 	if (vlan_id < 0x1000) {
 		cmd->params.vlan_dmac_b4_to_b5 |=
 		    vlan_id << OCRDMA_QP_PARAMS_VLAN_SHIFT;
@@ -2489,6 +2504,10 @@ static int ocrdma_set_av_params(struct ocrdma_qp *qp,
 			(dev->sl & 0x07) << OCRDMA_QP_PARAMS_SL_SHIFT;
 	}
 
+	cmd->params.max_sge_recv_flags |=
+					 ((hdr_type <<
+					 OCRDMA_QP_PARAMS_FLAGS_L3_TYPE_SHIFT) &
+					 OCRDMA_QP_PARAMS_FLAGS_L3_TYPE_MASK);
 	return 0;
 }
 
@@ -2534,10 +2553,8 @@ static int ocrdma_set_qp_params(struct ocrdma_qp *qp,
 		cmd->flags |= OCRDMA_QP_PARA_DST_QPN_VALID;
 	}
 	if (attr_mask & IB_QP_PATH_MTU) {
-		if (attrs->path_mtu < IB_MTU_512 ||
+		if (attrs->path_mtu < IB_MTU_256 ||
 		    attrs->path_mtu > IB_MTU_4096) {
-			pr_err("ocrdma%d: IB MTU %d is not supported\n",
-			       dev->id, ib_mtu_enum_to_int(attrs->path_mtu));
 			status = -EINVAL;
 			goto pmtu_err;
 		}
@@ -3164,9 +3181,9 @@ void ocrdma_cleanup_hw(struct ocrdma_dev *dev)
 	ocrdma_free_pd_pool(dev);
 	ocrdma_mbx_delete_ah_tbl(dev);
 
-	/* cleanup the control path */
-	ocrdma_destroy_mq(dev);
-
 	/* cleanup the eqs */
 	ocrdma_destroy_eqs(dev);
+
+	/* cleanup the control path */
+	ocrdma_destroy_mq(dev);
 }

@@ -48,7 +48,10 @@
 #include <linux/rwsem.h>
 #include <linux/scatterlist.h>
 #include <linux/workqueue.h>
+#include <net/net_namespace.h>
 #include <uapi/linux/if_ether.h>
+#include <net/ipv6.h>
+#include <net/ip.h>
 
 #include <linux/atomic.h>
 #include <linux/mmu_notifier.h>
@@ -62,6 +65,40 @@ union ib_gid {
 		__be64	subnet_prefix;
 		__be64	interface_id;
 	} global;
+};
+
+extern union ib_gid zgid;
+
+enum ib_gid_type {
+	/* If link layer is Ethernet, this is RoCE V1 */
+	IB_GID_TYPE_IB        = 0,
+	IB_GID_TYPE_IBOE_V1   = 0,
+	IB_GID_TYPE_IBOE_V2   = 1,
+	IB_GID_TYPE_SIZE
+};
+
+#define ROCE_V2_UDP_DPORT	4791
+
+struct ib_gid_attr {
+	enum ib_gid_type	gid_type;
+	struct net_device	*ndev;
+};
+
+struct ib_roce_gid_cache_entry {
+	/* seq number of 0 indicates entry being changed. */
+	unsigned int        seq;
+	union ib_gid        gid;
+	struct ib_gid_attr  attr;
+	void		   *context;
+	bool		    default_gid;
+};
+
+struct ib_roce_gid_cache {
+	int		     active;
+	int                  sz;
+	/* locking against multiple writes in data_vec */
+	struct mutex         lock;
+	struct ib_roce_gid_cache_entry *data_vec;
 };
 
 enum rdma_node_type {
@@ -83,6 +120,33 @@ enum rdma_transport_type {
 
 __attribute_const__ enum rdma_transport_type
 rdma_node_get_transport(enum rdma_node_type node_type);
+
+enum rdma_network_type {
+	RDMA_NETWORK_IB,
+	RDMA_NETWORK_IPV4,
+	RDMA_NETWORK_IPV6
+};
+
+static inline enum ib_gid_type ib_network_to_gid_type(enum rdma_network_type network_type)
+{
+	if (network_type == RDMA_NETWORK_IPV4 ||
+	    network_type == RDMA_NETWORK_IPV6)
+		return IB_GID_TYPE_IBOE_V2;
+
+	return IB_GID_TYPE_IB;
+}
+
+static inline enum rdma_network_type ib_gid_to_network_type(enum ib_gid_type gid_type,
+							    union ib_gid *gid)
+{
+	if (gid_type == IB_GID_TYPE_IB)
+		return RDMA_NETWORK_IB;
+
+	if (ipv6_addr_v4mapped((struct in6_addr *)gid))
+		return RDMA_NETWORK_IPV4;
+	else
+		return RDMA_NETWORK_IPV6;
+}
 
 enum rdma_link_layer {
 	IB_LINK_LAYER_UNSPECIFIED,
@@ -265,7 +329,9 @@ enum ib_port_cap_flags {
 	IB_PORT_BOOT_MGMT_SUP			= 1 << 23,
 	IB_PORT_LINK_LATENCY_SUP		= 1 << 24,
 	IB_PORT_CLIENT_REG_SUP			= 1 << 25,
-	IB_PORT_IP_BASED_GIDS			= 1 << 26
+	IB_PORT_IP_BASED_GIDS			= 1 << 26,
+	IB_PORT_IBOE_V1				= 1 << 27,
+	IB_PORT_IBOE_V2				= 1 << 28,
 };
 
 enum ib_port_width {
@@ -453,6 +519,14 @@ struct ib_grh {
 	union ib_gid	dgid;
 };
 
+union rdma_network_hdr {
+	struct ib_grh ibgrh;
+	struct {
+		u8		reserved[20];
+		struct iphdr	roce4grh;
+	};
+};
+
 enum {
 	IB_MULTICAST_QPN = 0xffffff
 };
@@ -635,7 +709,6 @@ struct ib_ah_attr {
 	u8			ah_flags;
 	u8			port_num;
 	u8			dmac[ETH_ALEN];
-	u16			vlan_id;
 };
 
 enum ib_wc_status {
@@ -690,6 +763,7 @@ enum ib_wc_flags {
 	IB_WC_IP_CSUM_OK	= (1<<3),
 	IB_WC_WITH_SMAC		= (1<<4),
 	IB_WC_WITH_VLAN		= (1<<5),
+	IB_WC_WITH_NETWORK_HDR_TYPE	= (1<<6),
 };
 
 struct ib_wc {
@@ -712,6 +786,7 @@ struct ib_wc {
 	u8			port_num;	/* valid only for DR SMPs on switches */
 	u8			smac[ETH_ALEN];
 	u16			vlan_id;
+	u8			network_hdr_type;
 };
 
 enum ib_cq_notify_flags {
@@ -893,10 +968,6 @@ enum ib_qp_attr_mask {
 	IB_QP_PATH_MIG_STATE		= (1<<18),
 	IB_QP_CAP			= (1<<19),
 	IB_QP_DEST_QPN			= (1<<20),
-	IB_QP_SMAC			= (1<<21),
-	IB_QP_ALT_SMAC			= (1<<22),
-	IB_QP_VID			= (1<<23),
-	IB_QP_ALT_VID			= (1<<24),
 };
 
 enum ib_qp_state {
@@ -946,10 +1017,6 @@ struct ib_qp_attr {
 	u8			rnr_retry;
 	u8			alt_port_num;
 	u8			alt_timeout;
-	u8			smac[ETH_ALEN];
-	u8			alt_smac[ETH_ALEN];
-	u16			vlan_id;
-	u16			alt_vlan_id;
 };
 
 enum ib_wr_opcode {
@@ -1431,6 +1498,8 @@ struct ib_cache {
 	struct ib_pkey_cache  **pkey_cache;
 	struct ib_gid_cache   **gid_cache;
 	u8                     *lmc_cache;
+	struct ib_roce_gid_cache **roce_gid_cache;
+	struct work_struct	roce_gid_cache_cleanup_work;
 };
 
 struct ib_dma_mapping_ops {
@@ -1503,9 +1572,37 @@ struct ib_device {
 						 struct ib_port_attr *port_attr);
 	enum rdma_link_layer	   (*get_link_layer)(struct ib_device *device,
 						     u8 port_num);
+	/* When calling get_netdev, the HW vendor's driver should return the
+	 * net device of device @device at port @port_num. The function
+	 * is called in rtnl_lock. The HW vendor's device driver must guarantee
+	 * to return NULL before the net device has reached
+	 * NETDEV_UNREGISTER_FINAL state.
+	 */
+	struct net_device	  *(*get_netdev)(struct ib_device *device,
+						 u8 port_num);
 	int		           (*query_gid)(struct ib_device *device,
 						u8 port_num, int index,
 						union ib_gid *gid);
+	/* When calling modify_gid, the HW vendor's driver should
+	 * modify the gid of device @device at gid index @index of
+	 * port @port to be @gid. Meta-info of that gid (for example,
+	 * the network device related to this gid is available
+	 * at @attr. @context allows the HW vendor driver to store extra
+	 * information together with a GID entry. The HW vendor may allocate
+	 * memory to contain this information and store it in @context when a
+	 * new GID entry is written to. Upon the deletion of a GID entry,
+	 * the HW vendor must free any allocated memory. The caller will clear
+	 * @context afterwards.GID deletion is done by passing the zero gid.
+	 * Params are consistent until the next call of modify_gid.
+	 * The function should return 0 on success or error otherwise.
+	 * The function could be called concurrently for different ports.
+	 */
+	int		           (*modify_gid)(struct ib_device *device,
+						 u8 port_num,
+						 unsigned int index,
+						 const union ib_gid *gid,
+						 const struct ib_gid_attr *attr,
+						 void **context);
 	int		           (*query_pkey)(struct ib_device *device,
 						 u8 port_num, u16 index, u16 *pkey);
 	int		           (*modify_device)(struct ib_device *device,
@@ -1663,6 +1760,7 @@ struct ib_device {
 	enum {
 		IB_DEV_UNINITIALIZED,
 		IB_DEV_REGISTERED,
+		IB_DEV_UNREGISTERING,
 		IB_DEV_UNREGISTERED
 	}                            reg_state;
 
@@ -1675,6 +1773,8 @@ struct ib_device {
 	u32			     local_dma_lkey;
 	u8                           node_type;
 	u8                           phys_port_cnt;
+	struct kref		     refcount;
+	struct completion	     free;
 };
 
 struct ib_client {
@@ -1687,6 +1787,9 @@ struct ib_client {
 
 struct ib_device *ib_alloc_device(size_t size);
 void ib_dealloc_device(struct ib_device *device);
+
+void ib_device_hold(struct ib_device *device);
+int ib_device_put(struct ib_device *device);
 
 int ib_register_device(struct ib_device *device,
 		       int (*port_callback)(struct ib_device *,
@@ -1744,7 +1847,8 @@ enum rdma_link_layer rdma_port_get_link_layer(struct ib_device *device,
 					       u8 port_num);
 
 int ib_query_gid(struct ib_device *device,
-		 u8 port_num, int index, union ib_gid *gid);
+		 u8 port_num, int index, union ib_gid *gid,
+		 struct ib_gid_attr *attr);
 
 int ib_query_pkey(struct ib_device *device,
 		  u8 port_num, u16 index, u16 *pkey);
@@ -1758,7 +1862,8 @@ int ib_modify_port(struct ib_device *device,
 		   struct ib_port_modify *port_modify);
 
 int ib_find_gid(struct ib_device *device, union ib_gid *gid,
-		u8 *port_num, u16 *index);
+		enum ib_gid_type gid_type, struct net *net,
+		int if_index, u8 *port_num, u16 *index);
 
 int ib_find_pkey(struct ib_device *device,
 		 u8 port_num, u16 pkey, u16 *index);

@@ -116,10 +116,21 @@ int qib_enable_wc(struct qib_devdata *dd)
 	}
 
 	if (!ret) {
-		dd->wc_cookie = arch_phys_wc_add(pioaddr, piolen);
-		if (dd->wc_cookie < 0)
-			/* use error from routine */
-			ret = dd->wc_cookie;
+		int cookie;
+
+		cookie = mtrr_add(pioaddr, piolen, MTRR_TYPE_WRCOMB, 0);
+		if (cookie < 0) {
+			{
+				qib_devinfo(dd->pcidev,
+					 "mtrr_add()  WC for PIO bufs failed (%d)\n",
+					 cookie);
+				ret = -EINVAL;
+			}
+		} else {
+			dd->wc_cookie = cookie;
+			dd->wc_base = (unsigned long) pioaddr;
+			dd->wc_len = (unsigned long) piolen;
+		}
 	}
 
 	return ret;
@@ -131,7 +142,18 @@ int qib_enable_wc(struct qib_devdata *dd)
  */
 void qib_disable_wc(struct qib_devdata *dd)
 {
-	arch_phys_wc_del(dd->wc_cookie);
+	if (dd->wc_cookie) {
+		int r;
+
+		r = mtrr_del(dd->wc_cookie, dd->wc_base,
+			     dd->wc_len);
+		if (r < 0)
+			qib_devinfo(dd->pcidev,
+				 "mtrr_del(%lx, %lx, %lx) failed: %d\n",
+				 dd->wc_cookie, dd->wc_base,
+				 dd->wc_len, r);
+		dd->wc_cookie = 0; /* even on failure */
+	}
 }
 
 /**

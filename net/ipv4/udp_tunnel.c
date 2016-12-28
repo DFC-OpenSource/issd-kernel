@@ -21,6 +21,17 @@ int udp_sock_create4(struct net *net, struct udp_port_cfg *cfg,
 
 	sk_change_net(sock->sk, net);
 
+        if (cfg->reuse_port) {
+                int opt = 1;
+                err = kernel_setsockopt(sock, SOL_SOCKET, SO_REUSEPORT,
+                                (char *)&opt, sizeof(opt));
+                if (err < 0) {
+                        printk("file : %s func : %s line : %d error : %d\n",__FILE__,__func__,__LINE__,err);
+                        goto error;
+                }
+        }
+
+
 	udp_addr.sin_family = AF_INET;
 	udp_addr.sin_addr = cfg->local_ip;
 	udp_addr.sin_port = cfg->local_udp_port;
@@ -74,6 +85,25 @@ void setup_udp_tunnel_sock(struct net *net, struct socket *sock,
 	udp_tunnel_encap_enable(sock);
 }
 EXPORT_SYMBOL_GPL(setup_udp_tunnel_sock);
+
+void udp_tunnel_prepare_skb(struct rtable *rt, struct sk_buff *skb,
+                            __be32 src, __be32 dst, __u8 tos, __u8 ttl,
+                            __be16 df, __be16 src_port, __be16 dst_port,
+                            bool xnet, bool nocheck)
+{
+        struct udphdr *uh;
+
+        __skb_push(skb, sizeof(*uh));
+        skb_reset_transport_header(skb);
+        uh = udp_hdr(skb);
+
+        uh->dest = dst_port;
+        uh->source = src_port;
+        uh->len = htons(skb->len);
+
+        udp_set_csum(nocheck, skb, src, dst, skb->len);
+}
+EXPORT_SYMBOL_GPL(udp_tunnel_prepare_skb);
 
 int udp_tunnel_xmit_skb(struct rtable *rt, struct sock *sk, struct sk_buff *skb,
 			__be32 src, __be32 dst, __u8 tos, __u8 ttl,

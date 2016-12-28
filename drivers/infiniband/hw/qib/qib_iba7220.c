@@ -4126,9 +4126,11 @@ static int qib_init_7220_variables(struct qib_devdata *dd)
 	qib_7220_config_ctxts(dd);
 	qib_set_ctxtcnt(dd);  /* needed for PAT setup */
 
-	ret = init_chip_wc_pat(dd, 0);
-	if (ret)
-		goto bail;
+	if (qib_wc_pat) {
+		ret = init_chip_wc_pat(dd, 0);
+		if (ret)
+			goto bail;
+	}
 	set_7220_baseaddrs(dd); /* set chip access pointers now */
 
 	ret = 0;

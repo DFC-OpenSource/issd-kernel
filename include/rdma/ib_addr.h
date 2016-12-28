@@ -71,6 +71,7 @@ struct rdma_dev_addr {
 	unsigned short dev_type;
 	int bound_dev_if;
 	enum rdma_transport_type transport;
+	enum rdma_network_type network;
 };
 
 /**
@@ -112,7 +113,7 @@ int rdma_addr_size(struct sockaddr *addr);
 
 int rdma_addr_find_smac_by_sgid(union ib_gid *sgid, u8 *smac, u16 *vlan_id);
 int rdma_addr_find_dmac_by_grh(union ib_gid *sgid, union ib_gid *dgid, u8 *smac,
-			       u16 *vlan_id);
+			       u16 *vlan_id, int if_index);
 
 static inline u16 ib_addr_get_pkey(struct rdma_dev_addr *dev_addr)
 {
@@ -142,7 +143,7 @@ static inline u16 rdma_vlan_dev_vlan_id(const struct net_device *dev)
 		vlan_dev_vlan_id(dev) : 0xffff;
 }
 
-static inline int rdma_ip2gid(struct sockaddr *addr, union ib_gid *gid)
+static inline int rdma_ip2gid(const struct sockaddr *addr, union ib_gid *gid)
 {
 	switch (addr->sa_family) {
 	case AF_INET:
@@ -160,7 +161,7 @@ static inline int rdma_ip2gid(struct sockaddr *addr, union ib_gid *gid)
 }
 
 /* Important - sockaddr should be a union of sockaddr_in and sockaddr_in6 */
-static inline void rdma_gid2ip(struct sockaddr *out, union ib_gid *gid)
+static inline int rdma_gid2ip(struct sockaddr *out, union ib_gid *gid)
 {
 	if (ipv6_addr_v4mapped((struct in6_addr *)gid)) {
 		struct sockaddr_in *out_in = (struct sockaddr_in *)out;
@@ -173,6 +174,7 @@ static inline void rdma_gid2ip(struct sockaddr *out, union ib_gid *gid)
 		out_in->sin6_family = AF_INET6;
 		memcpy(&out_in->sin6_addr.s6_addr, gid->raw, 16);
 	}
+	return 0;
 }
 
 static inline void iboe_addr_get_sgid(struct rdma_dev_addr *dev_addr,

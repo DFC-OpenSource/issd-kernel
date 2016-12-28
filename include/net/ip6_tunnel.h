@@ -93,4 +93,31 @@ static inline void ip6tunnel_xmit(struct sock *sk, struct sk_buff *skb,
 		stats->tx_aborted_errors++;
 	}
 }
+
+static inline int ip6tunnel_xmit_with_pkt_len(struct sock *sk, struct sk_buff *skb,
+                                  struct net_device *dev)
+{
+        struct net_device_stats *stats = &dev->stats;
+        int pkt_len, err;
+
+        pkt_len = skb->len;
+        //err = ip6_local_out_sk(sk, skb);
+        err = ip6_local_out(skb);
+
+        if (likely(net_xmit_eval(err) == 0)) {
+                struct pcpu_sw_netstats *tstats = this_cpu_ptr(dev->tstats);
+                u64_stats_update_begin(&tstats->syncp);
+                //tstats->tx_bytes += pkt_len;
+                //tstats->tx_packets++;
+                u64_stats_update_end(&tstats->syncp);
+        } else {
+                stats->tx_errors++;
+                stats->tx_aborted_errors++;
+
+                return 0;
+        }
+
+        return pkt_len;
+}
+
 #endif

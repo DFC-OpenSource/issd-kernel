@@ -173,3 +173,14 @@ int ip6_local_out(struct sk_buff *skb)
 	return ip6_local_out_sk(skb->sk, skb);
 }
 EXPORT_SYMBOL_GPL(ip6_local_out);
+
+void ip6_set_len(struct sk_buff *skb)
+{
+        int len;
+
+        len = skb->len - sizeof(struct ipv6hdr);
+        if (len > IPV6_MAXPLEN)
+                len = 0;
+        ipv6_hdr(skb)->payload_len = htons(len);
+}
+EXPORT_SYMBOL(ip6_set_len);

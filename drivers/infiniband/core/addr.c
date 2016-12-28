@@ -257,6 +257,9 @@ static int addr4_resolve(struct sockaddr_in *src_in,
 		goto put;
 	}
 
+	if (rt->rt_uses_gateway)
+		addr->network = RDMA_NETWORK_IPV4;
+
 	ret = dst_fetch_ha(&rt->dst, addr, &fl4.daddr);
 put:
 	ip_rt_put(rt);
@@ -271,6 +274,7 @@ static int addr6_resolve(struct sockaddr_in6 *src_in,
 {
 	struct flowi6 fl6;
 	struct dst_entry *dst;
+	struct rt6_info *rt;
 	int ret;
 
 	memset(&fl6, 0, sizeof fl6);
@@ -282,6 +286,7 @@ static int addr6_resolve(struct sockaddr_in6 *src_in,
 	if ((ret = dst->error))
 		goto put;
 
+	rt = (struct rt6_info *)dst;
 	if (ipv6_addr_any(&fl6.saddr)) {
 		ret = ipv6_dev_get_saddr(&init_net, ip6_dst_idev(dst)->dev,
 					 &fl6.daddr, 0, &fl6.saddr);
@@ -304,6 +309,9 @@ static int addr6_resolve(struct sockaddr_in6 *src_in,
 		ret = rdma_copy_addr(addr, dst->dev, NULL);
 		goto put;
 	}
+
+	if (rt->rt6i_flags & RTF_GATEWAY)
+		addr->network = RDMA_NETWORK_IPV6;
 
 	ret = dst_fetch_ha(dst, addr, &fl6.daddr);
 put:
@@ -458,7 +466,7 @@ static void resolve_cb(int status, struct sockaddr *src_addr,
 }
 
 int rdma_addr_find_dmac_by_grh(union ib_gid *sgid, union ib_gid *dgid, u8 *dmac,
-			       u16 *vlan_id)
+			       u16 *vlan_id, int if_index)
 {
 	int ret = 0;
 	struct rdma_dev_addr dev_addr;
@@ -472,10 +480,16 @@ int rdma_addr_find_dmac_by_grh(union ib_gid *sgid, union ib_gid *dgid, u8 *dmac,
 	} sgid_addr, dgid_addr;
 
 
-	rdma_gid2ip(&sgid_addr._sockaddr, sgid);
-	rdma_gid2ip(&dgid_addr._sockaddr, dgid);
+	ret = rdma_gid2ip(&sgid_addr._sockaddr, sgid);
+	if (ret)
+		return ret;
+
+	ret = rdma_gid2ip(&dgid_addr._sockaddr, dgid);
+	if (ret)
+		return ret;
 
 	memset(&dev_addr, 0, sizeof(dev_addr));
+	dev_addr.bound_dev_if = if_index;
 
 	ctx.addr = &dev_addr;
 	init_completion(&ctx.comp);
@@ -507,8 +521,10 @@ int rdma_addr_find_smac_by_sgid(union ib_gid *sgid, u8 *smac, u16 *vlan_id)
 		struct sockaddr_in6 _sockaddr_in6;
 	} gid_addr;
 
-	rdma_gid2ip(&gid_addr._sockaddr, sgid);
+	ret = rdma_gid2ip(&gid_addr._sockaddr, sgid);
 
+	if (ret)
+		return ret;
 	memset(&dev_addr, 0, sizeof(dev_addr));
 	ret = rdma_translate_ip(&gid_addr._sockaddr, &dev_addr, vlan_id);
 	if (ret)

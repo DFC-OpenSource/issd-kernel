@@ -39,6 +39,8 @@
 #include <linux/init.h>
 #include <linux/mutex.h>
 #include <rdma/rdma_netlink.h>
+#include <rdma/ib_addr.h>
+#include <rdma/ib_cache.h>
 
 #include "core_priv.h"
 
@@ -261,6 +263,39 @@ out:
 	return ret;
 }
 
+static void ib_device_complete_cb(struct kref *kref)
+{
+	struct ib_device *device = container_of(kref, struct ib_device,
+						refcount);
+
+	if (device->reg_state >= IB_DEV_UNREGISTERING)
+		complete(&device->free);
+}
+
+/**
+ * ib_device_hold - increase the reference count of device
+ * @device: ib device to prevent from being free'd
+ *
+ * Prevent the device from being free'd.
+ */
+void ib_device_hold(struct ib_device *device)
+{
+	kref_get(&device->refcount);
+}
+EXPORT_SYMBOL(ib_device_hold);
+
+/**
+ * ib_device_put - decrease the reference count of device
+ * @device: allows this device to be free'd
+ *
+ * Puts the ib_device and allows it to be free'd.
+ */
+int ib_device_put(struct ib_device *device)
+{
+	return kref_put(&device->refcount, ib_device_complete_cb);
+}
+EXPORT_SYMBOL(ib_device_put);
+
 /**
  * ib_register_device - Register an IB device with IB core
  * @device:Device to register
@@ -312,6 +347,9 @@ int ib_register_device(struct ib_device *device,
 
 	list_add_tail(&device->core_list, &device_list);
 
+	kref_init(&device->refcount);
+	init_completion(&device->free);
+
 	device->reg_state = IB_DEV_REGISTERED;
 
 	{
@@ -342,6 +380,8 @@ void ib_unregister_device(struct ib_device *device)
 
 	mutex_lock(&device_mutex);
 
+	device->reg_state = IB_DEV_UNREGISTERING;
+
 	list_for_each_entry_reverse(client, &client_list, list)
 		if (client->remove)
 			client->remove(device);
@@ -354,6 +394,9 @@ void ib_unregister_device(struct ib_device *device)
 	mutex_unlock(&device_mutex);
 
 	ib_device_unregister_sysfs(device);
+
+	ib_device_put(device);
+	wait_for_completion(&device->free);
 
 	spin_lock_irqsave(&device->client_data_lock, flags);
 	list_for_each_entry_safe(context, tmp, &device->client_data_list, list)
@@ -588,15 +631,100 @@ EXPORT_SYMBOL(ib_query_port);
  * @port_num:Port number to query
  * @index:GID table index to query
  * @gid:Returned GID
+ * @attr: Returned GID's attribute (only in RoCE)
  *
  * ib_query_gid() fetches the specified GID table entry.
  */
 int ib_query_gid(struct ib_device *device,
-		 u8 port_num, int index, union ib_gid *gid)
+		 u8 port_num, int index, union ib_gid *gid,
+		 struct ib_gid_attr *attr)
 {
+	if (!ib_cache_use_roce_gid_cache(device, port_num))
+		return roce_gid_cache_get_gid(device, port_num, index, gid,
+					      attr);
+
+	if (attr)
+		return -EINVAL;
+
 	return device->query_gid(device, port_num, index, gid);
 }
 EXPORT_SYMBOL(ib_query_gid);
+
+/**
+ * ib_dev_roce_ports_of_netdev - enumerate RoCE ports of ibdev in
+ *				 respect of netdev
+ * @ib_dev : IB device we want to query
+ * @filter: Should we call the callback?
+ * @filter_cookie: Cookie passed to filter
+ * @cb: Callback to call for each found RoCE ports
+ * @cookie: Cookie passed back to the callback
+ *
+ * Enumerates all of the physical RoCE ports of ib_dev RoCE ports
+ * which are relaying Ethernet packets to a specific
+ * (possibly virtual) netdevice according to filter.
+ */
+void ib_dev_roce_ports_of_netdev(struct ib_device *ib_dev,
+				 roce_netdev_filter filter,
+				 void *filter_cookie,
+				 roce_netdev_callback cb,
+				 void *cookie)
+{
+	u8 port;
+
+	if (ib_dev->modify_gid)
+		for (port = start_port(ib_dev); port <= end_port(ib_dev);
+		     port++)
+			if (ib_dev->get_link_layer(ib_dev, port) ==
+			    IB_LINK_LAYER_ETHERNET) {
+				struct net_device *idev = NULL;
+
+				rcu_read_lock();
+				if (ib_dev->get_netdev)
+					idev = ib_dev->get_netdev(ib_dev, port);
+
+				if (idev &&
+				    idev->reg_state >= NETREG_UNREGISTERED)
+					idev = NULL;
+
+				if (idev)
+					dev_hold(idev);
+
+				rcu_read_unlock();
+
+				if (filter(ib_dev, port, idev, filter_cookie))
+					cb(ib_dev, port, idev, cookie);
+
+				if (idev)
+					dev_put(idev);
+			}
+}
+
+/**
+ * ib_enum_roce_ports_of_netdev - enumerate RoCE ports of a netdev
+ * @filter: Should we call the callback?
+ * @filter_cookie: Cookie passed to filter
+ * @cb: Callback to call for each found RoCE ports
+ * @cookie: Cookie passed back to the callback
+ *
+ * Enumerates all of the physical RoCE ports which are relaying
+ * Ethernet packets to a specific (possibly virtual) netdevice
+ * according to filter.
+ */
+void ib_enum_roce_ports_of_netdev(roce_netdev_filter filter,
+				  void *filter_cookie,
+				  roce_netdev_callback cb,
+				  void *cookie)
+{
+	struct ib_device *dev;
+
+	mutex_lock(&device_mutex);
+
+	list_for_each_entry(dev, &device_list, core_list)
+		ib_dev_roce_ports_of_netdev(dev, filter, filter_cookie, cb,
+					    cookie);
+
+	mutex_unlock(&device_mutex);
+}
 
 /**
  * ib_query_pkey - Get P_Key table entry
@@ -666,19 +794,32 @@ EXPORT_SYMBOL(ib_modify_port);
  *   a specified GID value occurs.
  * @device: The device to query.
  * @gid: The GID value to search for.
+ * @gid_type: Type of GID.
+ * @net: The namespace to search this GID in (RoCE only).
+ *	 Valid only if if_index != 0.
+ * @if_index: The if_index assigned with this GID (RoCE only).
  * @port_num: The port number of the device where the GID value was found.
  * @index: The index into the GID table where the GID was found.  This
  *   parameter may be NULL.
  */
 int ib_find_gid(struct ib_device *device, union ib_gid *gid,
-		u8 *port_num, u16 *index)
+		enum ib_gid_type gid_type, struct net *net,
+		int if_index, u8 *port_num, u16 *index)
 {
 	union ib_gid tmp_gid;
 	int ret, port, i;
 
+	if (device->cache.roce_gid_cache &&
+	    !roce_gid_cache_find_gid(device, gid, gid_type, net, if_index,
+				     port_num, index))
+		return 0;
+
 	for (port = start_port(device); port <= end_port(device); ++port) {
+		if (!ib_cache_use_roce_gid_cache(device, port))
+			continue;
+
 		for (i = 0; i < device->gid_tbl_len[port - start_port(device)]; ++i) {
-			ret = ib_query_gid(device, port, i, &tmp_gid);
+			ret = ib_query_gid(device, port, i, &tmp_gid, NULL);
 			if (ret)
 				return ret;
 			if (!memcmp(&tmp_gid, gid, sizeof *gid)) {
@@ -753,6 +894,8 @@ static int __init ib_core_init(void)
 		goto err_sysfs;
 	}
 
+	roce_gid_cache_setup();
+
 	ret = ib_cache_setup();
 	if (ret) {
 		printk(KERN_WARNING "Couldn't set up InfiniBand P_Key/GID cache\n");
@@ -774,6 +917,7 @@ err:
 
 static void __exit ib_core_cleanup(void)
 {
+	roce_gid_cache_cleanup();
 	ib_cache_cleanup();
 	ibnl_cleanup();
 	ib_sysfs_cleanup();

@@ -178,8 +178,6 @@ struct cm_av {
 	struct ib_ah_attr ah_attr;
 	u16 pkey_index;
 	u8 timeout;
-	u8  valid;
-	u8  smac[ETH_ALEN];
 };
 
 struct cm_work {
@@ -360,7 +358,8 @@ static int cm_init_av_by_path(struct ib_sa_path_rec *path, struct cm_av *av)
 	read_lock_irqsave(&cm.device_lock, flags);
 	list_for_each_entry(cm_dev, &cm.device_list, list) {
 		if (!ib_find_cached_gid(cm_dev->ib_device, &path->sgid,
-					&p, NULL)) {
+					path->gid_type, path->net,
+					path->ifindex, &p, NULL)) {
 			port = cm_dev->port[p-1];
 			break;
 		}
@@ -379,9 +378,7 @@ static int cm_init_av_by_path(struct ib_sa_path_rec *path, struct cm_av *av)
 	ib_init_ah_from_path(cm_dev->ib_device, port->port_num, path,
 			     &av->ah_attr);
 	av->timeout = path->packet_life_time + 1;
-	memcpy(av->smac, path->smac, sizeof(av->smac));
 
-	av->valid = 1;
 	return 0;
 }
 
@@ -437,38 +434,39 @@ static struct cm_id_private * cm_acquire_id(__be32 local_id, __be32 remote_id)
 	return cm_id_priv;
 }
 
-static void cm_mask_copy(u32 *dst, const u32 *src, const u32 *mask)
+static void cm_mask_copy(u8 *dst, u8 *src, u8 *mask)
 {
 	int i;
 
-	for (i = 0; i < IB_CM_COMPARE_SIZE; i++)
-		dst[i] = src[i] & mask[i];
+	for (i = 0; i < IB_CM_COMPARE_SIZE / sizeof(unsigned long); i++)
+		((unsigned long *) dst)[i] = ((unsigned long *) src)[i] &
+					     ((unsigned long *) mask)[i];
 }
 
 static int cm_compare_data(struct ib_cm_compare_data *src_data,
 			   struct ib_cm_compare_data *dst_data)
 {
-	u32 src[IB_CM_COMPARE_SIZE];
-	u32 dst[IB_CM_COMPARE_SIZE];
+	u8 src[IB_CM_COMPARE_SIZE];
+	u8 dst[IB_CM_COMPARE_SIZE];
 
 	if (!src_data || !dst_data)
 		return 0;
 
 	cm_mask_copy(src, src_data->data, dst_data->mask);
 	cm_mask_copy(dst, dst_data->data, src_data->mask);
-	return memcmp(src, dst, sizeof(src));
+	return memcmp(src, dst, IB_CM_COMPARE_SIZE);
 }
 
-static int cm_compare_private_data(u32 *private_data,
+static int cm_compare_private_data(u8 *private_data,
 				   struct ib_cm_compare_data *dst_data)
 {
-	u32 src[IB_CM_COMPARE_SIZE];
+	u8 src[IB_CM_COMPARE_SIZE];
 
 	if (!dst_data)
 		return 0;
 
 	cm_mask_copy(src, private_data, dst_data->mask);
-	return memcmp(src, dst_data->data, sizeof(src));
+	return memcmp(src, dst_data->data, IB_CM_COMPARE_SIZE);
 }
 
 /*
@@ -537,7 +535,7 @@ static struct cm_id_private * cm_insert_listen(struct cm_id_private *cm_id_priv)
 
 static struct cm_id_private * cm_find_listen(struct ib_device *device,
 					     __be64 service_id,
-					     u32 *private_data)
+					     u8 *private_data)
 {
 	struct rb_node *node = cm.listen_service_table.rb_node;
 	struct cm_id_private *cm_id_priv;
@@ -861,7 +859,6 @@ retest:
 		cm_reject_sidr_req(cm_id_priv, IB_SIDR_REJECT);
 		break;
 	case IB_CM_REQ_SENT:
-	case IB_CM_MRA_REQ_RCVD:
 		ib_cancel_mad(cm_id_priv->av.port->mad_agent, cm_id_priv->msg);
 		spin_unlock_irq(&cm_id_priv->lock);
 		ib_send_cm_rej(cm_id, IB_CM_REJ_TIMEOUT,
@@ -880,6 +877,7 @@ retest:
 				       NULL, 0, NULL, 0);
 		}
 		break;
+	case IB_CM_MRA_REQ_RCVD:
 	case IB_CM_REP_SENT:
 	case IB_CM_MRA_REP_RCVD:
 		ib_cancel_mad(cm_id_priv->av.port->mad_agent, cm_id_priv->msg);
@@ -952,7 +950,7 @@ int ib_cm_listen(struct ib_cm_id *cm_id, __be64 service_id, __be64 service_mask,
 		cm_mask_copy(cm_id_priv->compare_data->data,
 			     compare_data->data, compare_data->mask);
 		memcpy(cm_id_priv->compare_data->mask, compare_data->mask,
-		       sizeof(compare_data->mask));
+		       IB_CM_COMPARE_SIZE);
 	}
 
 	cm_id->state = IB_CM_LISTEN;
@@ -1522,6 +1520,8 @@ static int cm_req_handler(struct cm_work *work)
 	struct ib_cm_id *cm_id;
 	struct cm_id_private *cm_id_priv, *listen_cm_id_priv;
 	struct cm_req_msg *req_msg;
+	union ib_gid gid;
+	struct ib_gid_attr gid_attr;
 	int ret;
 
 	req_msg = (struct cm_req_msg *)work->mad_recv_wc->recv_buf.mad;
@@ -1561,11 +1561,19 @@ static int cm_req_handler(struct cm_work *work)
 	cm_format_paths_from_req(req_msg, &work->path[0], &work->path[1]);
 
 	memcpy(work->path[0].dmac, cm_id_priv->av.ah_attr.dmac, ETH_ALEN);
-	work->path[0].vlan_id = cm_id_priv->av.ah_attr.vlan_id;
-	ret = cm_init_av_by_path(&work->path[0], &cm_id_priv->av);
+	ret = ib_get_cached_gid(work->port->cm_dev->ib_device,
+				work->port->port_num,
+				cm_id_priv->av.ah_attr.grh.sgid_index,
+				&gid, &gid_attr);
+	if (!ret) {
+		work->path[0].gid_type = gid_attr.gid_type;
+		ret = cm_init_av_by_path(&work->path[0], &cm_id_priv->av);
+	}
 	if (ret) {
 		ib_get_cached_gid(work->port->cm_dev->ib_device,
-				  work->port->port_num, 0, &work->path[0].sgid);
+				  work->port->port_num, 0, &work->path[0].sgid,
+				  &gid_attr);
+		work->path[0].gid_type = gid_attr.gid_type;
 		ib_send_cm_rej(cm_id, IB_CM_REJ_INVALID_GID,
 			       &work->path[0].sgid, sizeof work->path[0].sgid,
 			       NULL, 0);
@@ -3508,32 +3516,6 @@ static int cm_init_qp_rtr_attr(struct cm_id_private *cm_id_priv,
 		*qp_attr_mask = IB_QP_STATE | IB_QP_AV | IB_QP_PATH_MTU |
 				IB_QP_DEST_QPN | IB_QP_RQ_PSN;
 		qp_attr->ah_attr = cm_id_priv->av.ah_attr;
-		if (!cm_id_priv->av.valid) {
-			spin_unlock_irqrestore(&cm_id_priv->lock, flags);
-			return -EINVAL;
-		}
-		if (cm_id_priv->av.ah_attr.vlan_id != 0xffff) {
-			qp_attr->vlan_id = cm_id_priv->av.ah_attr.vlan_id;
-			*qp_attr_mask |= IB_QP_VID;
-		}
-		if (!is_zero_ether_addr(cm_id_priv->av.smac)) {
-			memcpy(qp_attr->smac, cm_id_priv->av.smac,
-			       sizeof(qp_attr->smac));
-			*qp_attr_mask |= IB_QP_SMAC;
-		}
-		if (cm_id_priv->alt_av.valid) {
-			if (cm_id_priv->alt_av.ah_attr.vlan_id != 0xffff) {
-				qp_attr->alt_vlan_id =
-					cm_id_priv->alt_av.ah_attr.vlan_id;
-				*qp_attr_mask |= IB_QP_ALT_VID;
-			}
-			if (!is_zero_ether_addr(cm_id_priv->alt_av.smac)) {
-				memcpy(qp_attr->alt_smac,
-				       cm_id_priv->alt_av.smac,
-				       sizeof(qp_attr->alt_smac));
-				*qp_attr_mask |= IB_QP_ALT_SMAC;
-			}
-		}
 		qp_attr->path_mtu = cm_id_priv->path_mtu;
 		qp_attr->dest_qp_num = be32_to_cpu(cm_id_priv->remote_qpn);
 		qp_attr->rq_psn = be32_to_cpu(cm_id_priv->rq_psn);

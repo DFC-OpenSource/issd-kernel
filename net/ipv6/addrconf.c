@@ -1875,6 +1875,7 @@ static int addrconf_ifid_eui48(u8 *eui, struct net_device *dev)
 	}
 	return 0;
 }
+EXPORT_SYMBOL_GPL(addrconf_ifid_eui48);
 
 static int addrconf_ifid_eui64(u8 *eui, struct net_device *dev)
 {

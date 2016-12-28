@@ -701,6 +701,7 @@ struct net_device *bond_option_active_slave_get_rcu(struct bonding *bond)
 
 	return __bond_option_active_slave_get(bond, slave);
 }
+EXPORT_SYMBOL_GPL(bond_option_active_slave_get_rcu);
 
 static int bond_option_active_slave_set(struct bonding *bond,
 					const struct bond_opt_value *newval)

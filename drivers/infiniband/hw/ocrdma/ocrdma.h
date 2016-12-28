@@ -36,11 +36,12 @@
 #include <rdma/ib_verbs.h>
 #include <rdma/ib_user_verbs.h>
 #include <rdma/ib_addr.h>
+#include <rdma/ib_cache.h>
 
 #include <be_roce.h>
 #include "ocrdma_sli.h"
 
-#define OCRDMA_ROCE_DRV_VERSION "10.6.0.0"
+#define OCRDMA_ROCE_DRV_VERSION "10.4.205.0u"
 
 #define OCRDMA_ROCE_DRV_DESC "Emulex OneConnect RoCE Driver"
 #define OCRDMA_NODE_DESC "Emulex OneConnect RoCE HCA"
@@ -99,6 +100,7 @@ struct ocrdma_dev_attr {
 	u8 local_ca_ack_delay;
 	u8 ird;
 	u8 num_ird_pages;
+	u8 roce_flags;
 };
 
 struct ocrdma_dma_mem {
@@ -339,6 +341,7 @@ struct ocrdma_ah {
 	struct ocrdma_av *av;
 	u16 sgid_index;
 	u32 id;
+	u8 hdr_type;
 };
 
 struct ocrdma_qp_hwq_info {
@@ -515,8 +518,6 @@ static inline int ocrdma_resolve_dmac(struct ocrdma_dev *dev,
 	memcpy(&in6, ah_attr->grh.dgid.raw, sizeof(in6));
 	if (rdma_is_multicast_addr(&in6))
 		rdma_get_mcast_mac(&in6, mac_addr);
-	else if (rdma_link_local_addr(&in6))
-		rdma_get_ll_mac(&in6, mac_addr);
 	else
 		memcpy(mac_addr, ah_attr->dmac, ETH_ALEN);
 	return 0;
@@ -574,6 +575,15 @@ static inline u8 ocrdma_is_enabled_and_synced(u32 state)
 	 */
 	return (state & OCRDMA_STATE_FLAG_ENABLED) &&
 		(state & OCRDMA_STATE_FLAG_SYNC);
+}
+
+static inline bool ocrdma_is_rocev2_supported(struct ocrdma_dev *dev)
+{
+	return (dev->attr.roce_flags & (OCRDMA_L3_TYPE_IPV4 <<
+					OCRDMA_ROUDP_FLAGS_SHIFT) ||
+		dev->attr.roce_flags & (OCRDMA_L3_TYPE_IPV6 <<
+					OCRDMA_ROUDP_FLAGS_SHIFT)) ?
+								true : false;
 }
 
 #endif

@@ -46,6 +46,39 @@
 #include <net/netns/generic.h>
 #include <net/rtnetlink.h>
 
+void iptunnel_prepare(struct rtable *rt, struct sk_buff *skb,
+                __be32 src, __be32 dst, __u8 proto,
+                __u8 tos, __u8 ttl, __be16 df, bool xnet)
+{
+        struct iphdr *iph;
+
+        skb_scrub_packet(skb, xnet);
+
+        skb_clear_hash(skb);
+        skb_dst_set(skb, &rt->dst);
+        memset(IPCB(skb), 0, sizeof(*IPCB(skb)));
+
+        /* Push down and install the IP header. */
+        skb_push(skb, sizeof(struct iphdr));
+        skb_reset_network_header(skb);
+
+        iph = ip_hdr(skb);
+
+        iph->version = 4;
+        iph->ihl = sizeof(struct iphdr) >> 2;
+        iph->frag_off = df;
+        iph->protocol = proto;
+        iph->tos = tos;
+        iph->daddr = dst;
+        iph->saddr = src;
+        iph->ttl = ttl;
+        __ip_select_ident_with_net(dev_net(rt->dst.dev), iph,
+                        skb_shinfo(skb)->gso_segs ?: 1);
+}
+
+EXPORT_SYMBOL_GPL(iptunnel_prepare);
+
+
 int iptunnel_xmit(struct sock *sk, struct rtable *rt, struct sk_buff *skb,
 		  __be32 src, __be32 dst, __u8 proto,
 		  __u8 tos, __u8 ttl, __be16 df, bool xnet)

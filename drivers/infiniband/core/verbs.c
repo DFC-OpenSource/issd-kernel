@@ -41,6 +41,9 @@
 #include <linux/export.h>
 #include <linux/string.h>
 #include <linux/slab.h>
+#include <linux/in.h>
+#include <linux/in6.h>
+#include <net/addrconf.h>
 
 #include <rdma/ib_verbs.h>
 #include <rdma/ib_cache.h>
@@ -192,6 +195,117 @@ struct ib_ah *ib_create_ah(struct ib_pd *pd, struct ib_ah_attr *ah_attr)
 }
 EXPORT_SYMBOL(ib_create_ah);
 
+static int ib_get_grh_header_version(const union rdma_network_hdr *h)
+{
+	const struct iphdr *ip4h = (struct iphdr *)&h->roce4grh;
+	struct iphdr ip4h_checked;
+	const struct ipv6hdr *ip6h = (struct ipv6hdr *)&h->ibgrh;
+
+	if (ip6h->version != 6)
+		return (ip4h->version == 4) ? 4 : 0;
+	/* version may be 6 or 4 */
+	if (ip4h->ihl != 5) /* IPv4 header length must be 5 for RR */
+		return 6;
+	/* Verify checksum.
+	   We can't write on scattered buffers so we need to copy to
+	   temp buffer.
+	 */
+	memcpy(&ip4h_checked, ip4h, sizeof(ip4h_checked));
+	ip4h_checked.check = 0;
+	ip4h_checked.check = ip_fast_csum((u8 *)&ip4h_checked, 5);
+	/* if IPv4 header checksum is OK, bellive it */
+	if (ip4h->check == ip4h_checked.check)
+		return 4;
+	return 6;
+}
+
+static enum rdma_network_type ib_get_net_type_by_grh(struct ib_device *device,
+						     u8 port_num,
+						     const struct ib_grh *grh)
+{
+	int grh_version;
+
+	if (rdma_port_get_link_layer(device, port_num) == IB_LINK_LAYER_INFINIBAND)
+		return RDMA_NETWORK_IB;
+
+	grh_version = ib_get_grh_header_version((union rdma_network_hdr *)grh);
+
+	if (grh_version == 4)
+		return RDMA_NETWORK_IPV4;
+
+	if (grh->next_hdr == IPPROTO_UDP)
+		return RDMA_NETWORK_IPV6;
+
+	return RDMA_NETWORK_IB;
+}
+
+struct find_gid_index_context {
+	u16 vlan_id;
+	enum ib_gid_type gid_type;
+};
+
+static bool find_gid_index(const union ib_gid *gid,
+			   const struct ib_gid_attr *gid_attr,
+			   void *context)
+{
+	struct find_gid_index_context *ctx =
+		(struct find_gid_index_context *)context;
+
+	if (ctx->gid_type != gid_attr->gid_type)
+		return false;
+
+	if ((!!(ctx->vlan_id != 0xffff) == !is_vlan_dev(gid_attr->ndev)) ||
+	    (is_vlan_dev(gid_attr->ndev) &&
+	     vlan_dev_vlan_id(gid_attr->ndev) != ctx->vlan_id))
+		return false;
+
+	return true;
+}
+
+static int get_sgid_index_from_eth(struct ib_device *device, u8 port_num,
+				   u16 vlan_id, union ib_gid *sgid,
+				   enum ib_gid_type gid_type,
+				   u16 *gid_index)
+{
+	struct find_gid_index_context context = {.vlan_id = vlan_id,
+						 .gid_type = gid_type};
+
+	return ib_find_gid_by_filter(device, sgid, port_num, find_gid_index,
+				     &context, gid_index);
+}
+
+static int get_gids_from_rdma_hdr(union rdma_network_hdr *hdr,
+				  enum rdma_network_type net_type,
+				  union ib_gid *sgid, union ib_gid *dgid)
+{
+	struct sockaddr_in  src_in;
+	struct sockaddr_in  dst_in;
+	__be32 src_saddr, dst_saddr;
+
+	if (!sgid || !dgid)
+		return -EINVAL;
+
+	if (net_type == RDMA_NETWORK_IPV4) {
+		memcpy(&src_in.sin_addr.s_addr,
+		       &hdr->roce4grh.saddr, 4);
+		memcpy(&dst_in.sin_addr.s_addr,
+		       &hdr->roce4grh.daddr, 4);
+		src_saddr = src_in.sin_addr.s_addr;
+		dst_saddr = dst_in.sin_addr.s_addr;
+		ipv6_addr_set_v4mapped(src_saddr,
+				       (struct in6_addr *)sgid);
+		ipv6_addr_set_v4mapped(dst_saddr,
+				       (struct in6_addr *)dgid);
+		return 0;
+	} else if (net_type == RDMA_NETWORK_IPV6 ||
+		   net_type == RDMA_NETWORK_IB) {
+		*dgid = hdr->ibgrh.dgid;
+		*sgid = hdr->ibgrh.sgid;
+		return 0;
+	} else
+		return -EINVAL;
+}
+
 int ib_init_ah_from_wc(struct ib_device *device, u8 port_num, struct ib_wc *wc,
 		       struct ib_grh *grh, struct ib_ah_attr *ah_attr)
 {
@@ -200,24 +314,49 @@ int ib_init_ah_from_wc(struct ib_device *device, u8 port_num, struct ib_wc *wc,
 	int ret;
 	int is_eth = (rdma_port_get_link_layer(device, port_num) ==
 			IB_LINK_LAYER_ETHERNET);
+	enum rdma_network_type net_type = RDMA_NETWORK_IB;
+	enum ib_gid_type gid_type = IB_GID_TYPE_IB;
+	union ib_gid dgid;
+	union ib_gid sgid;
 
 	memset(ah_attr, 0, sizeof *ah_attr);
 	if (is_eth) {
+		if (wc->wc_flags & IB_WC_WITH_NETWORK_HDR_TYPE)
+			net_type = wc->network_hdr_type;
+		else
+			net_type = ib_get_net_type_by_grh(device, port_num, grh);
+		gid_type = ib_network_to_gid_type(net_type);
+	}
+	ret = get_gids_from_rdma_hdr((union rdma_network_hdr *)grh, net_type,
+				     &sgid, &dgid);
+	if (ret)
+		return ret;
+
+	if (is_eth) {
+		u16 vlan_id = wc->wc_flags & IB_WC_WITH_VLAN ?
+				wc->vlan_id : 0xffff;
+
 		if (!(wc->wc_flags & IB_WC_GRH))
 			return -EPROTOTYPE;
 
-		if (wc->wc_flags & IB_WC_WITH_SMAC &&
-		    wc->wc_flags & IB_WC_WITH_VLAN) {
-			memcpy(ah_attr->dmac, wc->smac, ETH_ALEN);
-			ah_attr->vlan_id = wc->vlan_id;
-		} else {
-			ret = rdma_addr_find_dmac_by_grh(&grh->dgid, &grh->sgid,
-					ah_attr->dmac, &ah_attr->vlan_id);
+		if (!(wc->wc_flags & IB_WC_WITH_SMAC) ||
+		    !(wc->wc_flags & IB_WC_WITH_VLAN)) {
+			ret = rdma_addr_find_dmac_by_grh(&dgid, &sgid,
+							 ah_attr->dmac,
+							 wc->wc_flags & IB_WC_WITH_VLAN ?
+							 NULL : &vlan_id,
+							 0);
 			if (ret)
 				return ret;
 		}
-	} else {
-		ah_attr->vlan_id = 0xffff;
+
+		ret = get_sgid_index_from_eth(device, port_num, vlan_id,
+					      &dgid, gid_type, &gid_index);
+		if (ret)
+			return ret;
+
+		if (wc->wc_flags & IB_WC_WITH_SMAC)
+			memcpy(ah_attr->dmac, wc->smac, ETH_ALEN);
 	}
 
 	ah_attr->dlid = wc->slid;
@@ -227,12 +366,16 @@ int ib_init_ah_from_wc(struct ib_device *device, u8 port_num, struct ib_wc *wc,
 
 	if (wc->wc_flags & IB_WC_GRH) {
 		ah_attr->ah_flags = IB_AH_GRH;
-		ah_attr->grh.dgid = grh->sgid;
+		ah_attr->grh.dgid = sgid;
 
-		ret = ib_find_cached_gid(device, &grh->dgid, &port_num,
-					 &gid_index);
-		if (ret)
-			return ret;
+		if (!is_eth) {
+			ret = ib_find_cached_gid_by_port(device, &dgid,
+							 IB_GID_TYPE_IB,
+							 port_num, NULL, 0,
+							 &gid_index);
+			if (ret)
+				return ret;
+		}
 
 		ah_attr->grh.sgid_index = (u8) gid_index;
 		flow_class = be32_to_cpu(grh->version_tclass_flow);
@@ -502,9 +645,7 @@ EXPORT_SYMBOL(ib_create_qp);
 static const struct {
 	int			valid;
 	enum ib_qp_attr_mask	req_param[IB_QPT_MAX];
-	enum ib_qp_attr_mask	req_param_add_eth[IB_QPT_MAX];
 	enum ib_qp_attr_mask	opt_param[IB_QPT_MAX];
-	enum ib_qp_attr_mask	opt_param_add_eth[IB_QPT_MAX];
 } qp_state_table[IB_QPS_ERR + 1][IB_QPS_ERR + 1] = {
 	[IB_QPS_RESET] = {
 		[IB_QPS_RESET] = { .valid = 1 },
@@ -585,12 +726,6 @@ static const struct {
 						IB_QP_MAX_DEST_RD_ATOMIC	|
 						IB_QP_MIN_RNR_TIMER),
 			},
-			.req_param_add_eth = {
-				[IB_QPT_RC]  = (IB_QP_SMAC),
-				[IB_QPT_UC]  = (IB_QP_SMAC),
-				[IB_QPT_XRC_INI]  = (IB_QP_SMAC),
-				[IB_QPT_XRC_TGT]  = (IB_QP_SMAC)
-			},
 			.opt_param = {
 				 [IB_QPT_UD]  = (IB_QP_PKEY_INDEX		|
 						 IB_QP_QKEY),
@@ -611,21 +746,7 @@ static const struct {
 				 [IB_QPT_GSI] = (IB_QP_PKEY_INDEX		|
 						 IB_QP_QKEY),
 			 },
-			.opt_param_add_eth = {
-				[IB_QPT_RC]  = (IB_QP_ALT_SMAC			|
-						IB_QP_VID			|
-						IB_QP_ALT_VID),
-				[IB_QPT_UC]  = (IB_QP_ALT_SMAC			|
-						IB_QP_VID			|
-						IB_QP_ALT_VID),
-				[IB_QPT_XRC_INI]  = (IB_QP_ALT_SMAC			|
-						IB_QP_VID			|
-						IB_QP_ALT_VID),
-				[IB_QPT_XRC_TGT]  = (IB_QP_ALT_SMAC			|
-						IB_QP_VID			|
-						IB_QP_ALT_VID)
-			}
-		}
+		},
 	},
 	[IB_QPS_RTR]   = {
 		[IB_QPS_RESET] = { .valid = 1 },
@@ -847,13 +968,6 @@ int ib_modify_qp_is_ok(enum ib_qp_state cur_state, enum ib_qp_state next_state,
 	req_param = qp_state_table[cur_state][next_state].req_param[type];
 	opt_param = qp_state_table[cur_state][next_state].opt_param[type];
 
-	if (ll == IB_LINK_LAYER_ETHERNET) {
-		req_param |= qp_state_table[cur_state][next_state].
-			req_param_add_eth[type];
-		opt_param |= qp_state_table[cur_state][next_state].
-			opt_param_add_eth[type];
-	}
-
 	if ((mask & req_param) != req_param)
 		return 0;
 
@@ -864,40 +978,58 @@ int ib_modify_qp_is_ok(enum ib_qp_state cur_state, enum ib_qp_state next_state,
 }
 EXPORT_SYMBOL(ib_modify_qp_is_ok);
 
-int ib_resolve_eth_l2_attrs(struct ib_qp *qp,
-			    struct ib_qp_attr *qp_attr, int *qp_attr_mask)
+int ib_resolve_eth_dmac(struct ib_qp *qp,
+			struct ib_qp_attr *qp_attr, int *qp_attr_mask)
 {
 	int           ret = 0;
-	union ib_gid  sgid;
+	u8	      start_port = qp->device->node_type == RDMA_NODE_IB_SWITCH ? 0 : 1;
 
 	if ((*qp_attr_mask & IB_QP_AV)  &&
-	    (rdma_port_get_link_layer(qp->device, qp_attr->ah_attr.port_num) == IB_LINK_LAYER_ETHERNET)) {
-		ret = ib_query_gid(qp->device, qp_attr->ah_attr.port_num,
-				   qp_attr->ah_attr.grh.sgid_index, &sgid);
-		if (ret)
-			goto out;
+	    (qp_attr->ah_attr.port_num >= start_port) &&
+	    (qp_attr->ah_attr.port_num < start_port + qp->device->phys_port_cnt) &&
+	    (rdma_port_get_link_layer(qp->device, qp_attr->ah_attr.port_num) ==
+	     IB_LINK_LAYER_ETHERNET)) {
 		if (rdma_link_local_addr((struct in6_addr *)qp_attr->ah_attr.grh.dgid.raw)) {
-			rdma_get_ll_mac((struct in6_addr *)qp_attr->ah_attr.grh.dgid.raw, qp_attr->ah_attr.dmac);
-			rdma_get_ll_mac((struct in6_addr *)sgid.raw, qp_attr->smac);
-			if (!(*qp_attr_mask & IB_QP_VID))
-				qp_attr->vlan_id = rdma_get_vlan_id(&sgid);
+			rdma_get_ll_mac((struct in6_addr *)qp_attr->ah_attr.grh.dgid.raw,
+					qp_attr->ah_attr.dmac);
 		} else {
-			ret = rdma_addr_find_dmac_by_grh(&sgid, &qp_attr->ah_attr.grh.dgid,
-					qp_attr->ah_attr.dmac, &qp_attr->vlan_id);
-			if (ret)
+			union ib_gid		sgid;
+			struct ib_gid_attr	sgid_attr;
+			int			ifindex;
+
+			rcu_read_lock();
+			ret = ib_query_gid(qp->device,
+					   qp_attr->ah_attr.port_num,
+					   qp_attr->ah_attr.grh.sgid_index,
+					   &sgid, &sgid_attr);
+
+			if (ret || !sgid_attr.ndev) {
+				if (!ret)
+					ret = -ENXIO;
+				rcu_read_unlock();
 				goto out;
-			ret = rdma_addr_find_smac_by_sgid(&sgid, qp_attr->smac, NULL);
-			if (ret)
-				goto out;
+			}
+			if (sgid_attr.gid_type == IB_GID_TYPE_IBOE_V2)
+				qp_attr->ah_attr.grh.hop_limit =
+							IPV6_DEFAULT_HOPLIMIT;
+
+			dev_hold(sgid_attr.ndev);
+			ifindex = sgid_attr.ndev->ifindex;
+
+			rcu_read_unlock();
+
+			ret = rdma_addr_find_dmac_by_grh(&sgid,
+							 &qp_attr->ah_attr.grh.dgid,
+							 qp_attr->ah_attr.dmac,
+							 NULL, ifindex);
+
+			dev_put(sgid_attr.ndev);
 		}
-		*qp_attr_mask |= IB_QP_SMAC;
-		if (qp_attr->vlan_id < 0xFFFF)
-			*qp_attr_mask |= IB_QP_VID;
 	}
 out:
 	return ret;
 }
-EXPORT_SYMBOL(ib_resolve_eth_l2_attrs);
+EXPORT_SYMBOL(ib_resolve_eth_dmac);
 
 
 int ib_modify_qp(struct ib_qp *qp,
@@ -906,7 +1038,7 @@ int ib_modify_qp(struct ib_qp *qp,
 {
 	int ret;
 
-	ret = ib_resolve_eth_l2_attrs(qp, qp_attr, &qp_attr_mask);
+	ret = ib_resolve_eth_dmac(qp, qp_attr, &qp_attr_mask);
 	if (ret)
 		return ret;
 

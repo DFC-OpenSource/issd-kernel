@@ -3558,6 +3558,17 @@ struct netdev_bonding_info {
 	ifbond	master;
 };
 
+enum netdev_changeupper_event {
+        NETDEV_CHANGEUPPER_LINK,
+        NETDEV_CHANGEUPPER_UNLINK,
+};
+
+struct netdev_changeupper_info {
+        struct netdev_notifier_info     info; /* must be first */
+        enum netdev_changeupper_event   event;
+        struct net_device               *upper;
+};
+
 struct netdev_notifier_bonding_info {
 	struct netdev_notifier_info info; /* must be first */
 	struct netdev_bonding_info  bonding_info;

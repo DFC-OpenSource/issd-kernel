@@ -125,6 +125,14 @@ enum {
 	OCRDMA_DB_RQ_SHIFT		= 24
 };
 
+enum {
+	OCRDMA_L3_TYPE_IB_GRH   = 0x00,
+	OCRDMA_L3_TYPE_IPV4     = 0x01,
+	OCRDMA_L3_TYPE_IPV6     = 0x02
+};
+
+#define OCRDMA_ROUDP_FLAGS_SHIFT	0x03
+
 #define OCRDMA_DB_CQ_RING_ID_MASK       0x3FF	/* bits 0 - 9 */
 #define OCRDMA_DB_CQ_RING_ID_EXT_MASK  0x0C00	/* bits 10-11 of qid at 12-11 */
 /* qid #2 msbits at 12-11 */
@@ -488,6 +496,9 @@ enum {
 	OCRDMA_MBX_QUERY_CFG_CA_ACK_DELAY_SHIFT		= 8,
 	OCRDMA_MBX_QUERY_CFG_CA_ACK_DELAY_MASK		= 0xFF <<
 				OCRDMA_MBX_QUERY_CFG_CA_ACK_DELAY_SHIFT,
+	OCRDMA_MBX_QUERY_CFG_L3_TYPE_SHIFT		 = 0,
+	OCRDMA_MBX_QUERY_CFG_L3_TYPE_MASK		= 0xFF <<
+				OCRDMA_MBX_QUERY_CFG_L3_TYPE_SHIFT,
 
 	OCRDMA_MBX_QUERY_CFG_MAX_SEND_SGE_SHIFT		= 0,
 	OCRDMA_MBX_QUERY_CFG_MAX_SEND_SGE_MASK		= 0xFFFF,
@@ -1049,6 +1060,8 @@ enum {
 	OCRDMA_QP_PARAMS_STATE_MASK		= BIT(5) | BIT(6) | BIT(7),
 	OCRDMA_QP_PARAMS_FLAGS_SQD_ASYNC	= BIT(8),
 	OCRDMA_QP_PARAMS_FLAGS_INB_ATEN		= BIT(9),
+	OCRDMA_QP_PARAMS_FLAGS_L3_TYPE_SHIFT	= 11,
+	OCRDMA_QP_PARAMS_FLAGS_L3_TYPE_MASK	= BIT(11) | BIT(12) | BIT(13),
 	OCRDMA_QP_PARAMS_MAX_SGE_RECV_SHIFT	= 16,
 	OCRDMA_QP_PARAMS_MAX_SGE_RECV_MASK	= 0xFFFF <<
 					OCRDMA_QP_PARAMS_MAX_SGE_RECV_SHIFT,
@@ -1176,8 +1189,6 @@ struct ocrdma_query_qp_rsp {
 	struct ocrdma_mqe_hdr hdr;
 	struct ocrdma_mbx_rsp rsp;
 	struct ocrdma_qp_params params;
-	u32 dpp_credits_cqid;
-	u32 rbq_id;
 };
 
 enum {
@@ -1626,17 +1637,10 @@ struct ocrdma_delete_ah_tbl_rsp {
 enum {
 	OCRDMA_EQE_VALID_SHIFT		= 0,
 	OCRDMA_EQE_VALID_MASK		= BIT(0),
-	OCRDMA_EQE_MAJOR_CODE_MASK      = 0x0E,
-	OCRDMA_EQE_MAJOR_CODE_SHIFT     = 0x01,
 	OCRDMA_EQE_FOR_CQE_MASK		= 0xFFFE,
 	OCRDMA_EQE_RESOURCE_ID_SHIFT	= 16,
 	OCRDMA_EQE_RESOURCE_ID_MASK	= 0xFFFF <<
 				OCRDMA_EQE_RESOURCE_ID_SHIFT,
-};
-
-enum major_code {
-	OCRDMA_MAJOR_CODE_COMPLETION    = 0x00,
-	OCRDMA_MAJOR_CODE_SENTINAL      = 0x01
 };
 
 struct ocrdma_eqe {
@@ -1677,8 +1681,11 @@ enum {
 
 	/* w1 */
 	OCRDMA_CQE_UD_XFER_LEN_SHIFT	= 16,
+	OCRDMA_CQE_UD_XFER_LEN_MASK     = 0x1FFF,
 	OCRDMA_CQE_PKEY_SHIFT		= 0,
 	OCRDMA_CQE_PKEY_MASK		= 0xFFFF,
+	OCRDMA_CQE_UD_L3TYPE_SHIFT      = 29,
+	OCRDMA_CQE_UD_L3TYPE_MASK       = 0x07,
 
 	/* w2 */
 	OCRDMA_CQE_QPN_SHIFT		= 0,
@@ -1803,7 +1810,7 @@ struct ocrdma_ewqe_ud_hdr {
 	u32 rsvd_dest_qpn;
 	u32 qkey;
 	u32 rsvd_ahid;
-	u32 rsvd;
+	u32 hdr_type;
 };
 
 /* extended wqe followed by hdr_wqe for Fast Memory register */

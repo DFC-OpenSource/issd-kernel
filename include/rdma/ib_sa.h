@@ -154,9 +154,10 @@ struct ib_sa_path_rec {
 	u8           packet_life_time_selector;
 	u8           packet_life_time;
 	u8           preference;
-	u8           smac[ETH_ALEN];
 	u8           dmac[ETH_ALEN];
-	u16	     vlan_id;
+	int	     ifindex;
+	struct net  *net;
+	enum ib_gid_type gid_type;
 };
 
 #define IB_SA_MCMEMBER_REC_MGID				IB_SA_COMP_MASK( 0)
@@ -197,6 +198,9 @@ struct ib_sa_mcmember_rec {
 	u8           scope;
 	u8           join_state;
 	int          proxy_join;
+	int	     ifindex;
+	struct net  *net;
+	enum ib_gid_type gid_type;
 };
 
 /* Service Record Component Mask Sec 15.2.5.14 Ver 1.1	*/
