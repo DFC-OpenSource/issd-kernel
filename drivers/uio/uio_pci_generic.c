@@ -55,7 +55,7 @@
 #define CLASS_ID  0x010802
 
 #define PCIE_REGS_START         0x3600000
-#define PCIE_REGS_SIZE          16*1024UL
+#define PCIE_REGS_SIZE          1024*1024UL
 
 #define DBI_REG                 0x8bc
 #define LUT_CTRL_REG            0x807f8
