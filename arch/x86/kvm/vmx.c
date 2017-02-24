@@ -1172,10 +1172,10 @@ static inline bool nested_cpu_has_posted_intr(struct vmcs12 *vmcs12)
 	return vmcs12->pin_based_vm_exec_control & PIN_BASED_POSTED_INTR;
 }
 
-static inline bool is_exception(u32 intr_info)
+static inline bool is_nmi(u32 intr_info)
 {
 	return (intr_info & (INTR_INFO_INTR_TYPE_MASK | INTR_INFO_VALID_MASK))
-		== (INTR_TYPE_HARD_EXCEPTION | INTR_INFO_VALID_MASK);
+		== (INTR_TYPE_NMI_INTR | INTR_INFO_VALID_MASK);
 }
 
 static void nested_vmx_vmexit(struct kvm_vcpu *vcpu, u32 exit_reason,
@@ -1567,7 +1567,7 @@ static void update_exception_bitmap(struct kvm_vcpu *vcpu)
 	u32 eb;
 
 	eb = (1u << PF_VECTOR) | (1u << UD_VECTOR) | (1u << MC_VECTOR) |
-	     (1u << NM_VECTOR) | (1u << DB_VECTOR);
+	     (1u << NM_VECTOR) | (1u << DB_VECTOR) | (1u << AC_VECTOR);
 	if ((vcpu->guest_debug &
 	     (KVM_GUESTDBG_ENABLE | KVM_GUESTDBG_USE_SW_BP)) ==
 	    (KVM_GUESTDBG_ENABLE | KVM_GUESTDBG_USE_SW_BP))
@@ -1674,6 +1674,13 @@ static void add_atomic_switch_msr(struct vcpu_vmx *vmx, unsigned msr,
 			return;
 		}
 		break;
+	case MSR_IA32_PEBS_ENABLE:
+		/* PEBS needs a quiescent period after being disabled (to write
+		 * a record).  Disabling PEBS through VMX MSR swapping doesn't
+		 * provide that period, so a CPU could write host's record into
+		 * guest's memory.
+		 */
+		wrmsrl(MSR_IA32_PEBS_ENABLE, 0);
 	}
 
 	for (i = 0; i < m->nr; ++i)
@@ -1711,26 +1718,31 @@ static void reload_tss(void)
 
 static bool update_transition_efer(struct vcpu_vmx *vmx, int efer_offset)
 {
-	u64 guest_efer;
-	u64 ignore_bits;
+	u64 guest_efer = vmx->vcpu.arch.efer;
+	u64 ignore_bits = 0;
 
-	guest_efer = vmx->vcpu.arch.efer;
+	if (!enable_ept) {
+		/*
+		 * NX is needed to handle CR0.WP=1, CR4.SMEP=1.  Testing
+		 * host CPUID is more efficient than testing guest CPUID
+		 * or CR4.  Host SMEP is anyway a requirement for guest SMEP.
+		 */
+		if (boot_cpu_has(X86_FEATURE_SMEP))
+			guest_efer |= EFER_NX;
+		else if (!(guest_efer & EFER_NX))
+			ignore_bits |= EFER_NX;
+	}
 
 	/*
-	 * NX is emulated; LMA and LME handled by hardware; SCE meaningless
-	 * outside long mode
+	 * LMA and LME handled by hardware; SCE meaningless outside long mode.
 	 */
-	ignore_bits = EFER_NX | EFER_SCE;
+	ignore_bits |= EFER_SCE;
 #ifdef CONFIG_X86_64
 	ignore_bits |= EFER_LMA | EFER_LME;
 	/* SCE is meaningful only in long mode on Intel */
 	if (guest_efer & EFER_LMA)
 		ignore_bits &= ~(u64)EFER_SCE;
 #endif
-	guest_efer &= ~ignore_bits;
-	guest_efer |= host_efer & ignore_bits;
-	vmx->guest_msrs[efer_offset].data = guest_efer;
-	vmx->guest_msrs[efer_offset].mask = ~ignore_bits;
 
 	clear_atomic_switch_msr(vmx, MSR_EFER);
 
@@ -1741,16 +1753,21 @@ static bool update_transition_efer(struct vcpu_vmx *vmx, int efer_offset)
 	 */
 	if (cpu_has_load_ia32_efer ||
 	    (enable_ept && ((vmx->vcpu.arch.efer ^ host_efer) & EFER_NX))) {
-		guest_efer = vmx->vcpu.arch.efer;
 		if (!(guest_efer & EFER_LMA))
 			guest_efer &= ~EFER_LME;
 		if (guest_efer != host_efer)
 			add_atomic_switch_msr(vmx, MSR_EFER,
 					      guest_efer, host_efer);
 		return false;
-	}
+	} else {
+		guest_efer &= ~ignore_bits;
+		guest_efer |= host_efer & ignore_bits;
 
-	return true;
+		vmx->guest_msrs[efer_offset].data = guest_efer;
+		vmx->guest_msrs[efer_offset].mask = ~ignore_bits;
+
+		return true;
+	}
 }
 
 static unsigned long segment_base(u16 selector)
@@ -3652,19 +3669,20 @@ static int vmx_set_cr4(struct kvm_vcpu *vcpu, unsigned long cr4)
 		if (!is_paging(vcpu)) {
 			hw_cr4 &= ~X86_CR4_PAE;
 			hw_cr4 |= X86_CR4_PSE;
-			/*
-			 * SMEP/SMAP is disabled if CPU is in non-paging mode
-			 * in hardware. However KVM always uses paging mode to
-			 * emulate guest non-paging mode with TDP.
-			 * To emulate this behavior, SMEP/SMAP needs to be
-			 * manually disabled when guest switches to non-paging
-			 * mode.
-			 */
-			hw_cr4 &= ~(X86_CR4_SMEP | X86_CR4_SMAP);
 		} else if (!(cr4 & X86_CR4_PAE)) {
 			hw_cr4 &= ~X86_CR4_PAE;
 		}
 	}
+
+	if (!enable_unrestricted_guest && !is_paging(vcpu))
+		/*
+		 * SMEP/SMAP is disabled if CPU is in non-paging mode in
+		 * hardware.  However KVM always uses paging mode without
+		 * unrestricted guest.
+		 * To emulate this behavior, SMEP/SMAP needs to be manually
+		 * disabled when guest switches to non-paging mode.
+		 */
+		hw_cr4 &= ~(X86_CR4_SMEP | X86_CR4_SMAP);
 
 	vmcs_writel(CR4_READ_SHADOW, cr4);
 	vmcs_writel(GUEST_CR4, hw_cr4);
@@ -5071,7 +5089,7 @@ static int handle_exception(struct kvm_vcpu *vcpu)
 	if (is_machine_check(intr_info))
 		return handle_machine_check(vcpu);
 
-	if ((intr_info & INTR_INFO_INTR_TYPE_MASK) == INTR_TYPE_NMI_INTR)
+	if (is_nmi(intr_info))
 		return 1;  /* already handled by vmx_vcpu_run() */
 
 	if (is_no_device(intr_info)) {
@@ -5127,6 +5145,9 @@ static int handle_exception(struct kvm_vcpu *vcpu)
 		return handle_rmode_exception(vcpu, ex_no, error_code);
 
 	switch (ex_no) {
+	case AC_VECTOR:
+		kvm_queue_exception_e(vcpu, AC_VECTOR, error_code);
+		return 1;
 	case DB_VECTOR:
 		dr6 = vmcs_readl(EXIT_QUALIFICATION);
 		if (!(vcpu->guest_debug &
@@ -6143,6 +6164,8 @@ static __init int hardware_setup(void)
 			vmx_msr_bitmap_legacy, PAGE_SIZE);
 	memcpy(vmx_msr_bitmap_longmode_x2apic,
 			vmx_msr_bitmap_longmode, PAGE_SIZE);
+
+	set_bit(0, vmx_vpid_bitmap); /* 0 is reserved for host */
 
 	if (enable_apicv) {
 		for (msr = 0x800; msr <= 0x8ff; msr++)
@@ -7187,6 +7210,7 @@ static int handle_invept(struct kvm_vcpu *vcpu)
 	if (!(types & (1UL << type))) {
 		nested_vmx_failValid(vcpu,
 				VMXERR_INVALID_OPERAND_TO_INVEPT_INVVPID);
+		skip_emulated_instruction(vcpu);
 		return 1;
 	}
 
@@ -7495,7 +7519,7 @@ static bool nested_vmx_exit_handled(struct kvm_vcpu *vcpu)
 
 	switch (exit_reason) {
 	case EXIT_REASON_EXCEPTION_NMI:
-		if (!is_exception(intr_info))
+		if (is_nmi(intr_info))
 			return false;
 		else if (is_page_fault(intr_info))
 			return enable_ept;
@@ -7746,6 +7770,7 @@ static int vmx_handle_exit(struct kvm_vcpu *vcpu)
 	if ((vectoring_info & VECTORING_INFO_VALID_MASK) &&
 			(exit_reason != EXIT_REASON_EXCEPTION_NMI &&
 			exit_reason != EXIT_REASON_EPT_VIOLATION &&
+			exit_reason != EXIT_REASON_PML_FULL &&
 			exit_reason != EXIT_REASON_TASK_SWITCH)) {
 		vcpu->run->exit_reason = KVM_EXIT_INTERNAL_ERROR;
 		vcpu->run->internal.suberror = KVM_INTERNAL_ERROR_DELIVERY_EV;
@@ -7942,8 +7967,7 @@ static void vmx_complete_atomic_exit(struct vcpu_vmx *vmx)
 		kvm_machine_check();
 
 	/* We need to handle NMIs before interrupts are enabled */
-	if ((exit_intr_info & INTR_INFO_INTR_TYPE_MASK) == INTR_TYPE_NMI_INTR &&
-	    (exit_intr_info & INTR_INFO_VALID_MASK)) {
+	if (is_nmi(exit_intr_info)) {
 		kvm_before_handle_nmi(&vmx->vcpu);
 		asm("int $2");
 		kvm_after_handle_nmi(&vmx->vcpu);
@@ -8353,6 +8377,22 @@ static void vmx_load_vmcs01(struct kvm_vcpu *vcpu)
 	put_cpu();
 }
 
+/*
+ * Ensure that the current vmcs of the logical processor is the
+ * vmcs01 of the vcpu before calling free_nested().
+ */
+static void vmx_free_vcpu_nested(struct kvm_vcpu *vcpu)
+{
+       struct vcpu_vmx *vmx = to_vmx(vcpu);
+       int r;
+
+       r = vcpu_load(vcpu);
+       BUG_ON(r);
+       vmx_load_vmcs01(vcpu);
+       free_nested(vmx);
+       vcpu_put(vcpu);
+}
+
 static void vmx_free_vcpu(struct kvm_vcpu *vcpu)
 {
 	struct vcpu_vmx *vmx = to_vmx(vcpu);
@@ -8361,8 +8401,7 @@ static void vmx_free_vcpu(struct kvm_vcpu *vcpu)
 		vmx_disable_pml(vmx);
 	free_vpid(vmx);
 	leave_guest_mode(vcpu);
-	vmx_load_vmcs01(vcpu);
-	free_nested(vmx);
+	vmx_free_vcpu_nested(vcpu);
 	free_loaded_vmcs(vmx->loaded_vmcs);
 	kfree(vmx->guest_msrs);
 	kvm_vcpu_uninit(vcpu);
