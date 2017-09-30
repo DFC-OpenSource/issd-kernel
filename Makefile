@@ -404,7 +404,7 @@ KBUILD_CFLAGS   := -Wall -Wundef -Wstrict-prototypes -Wno-trigraphs \
 		   -std=gnu89
 
 # Additional optimizations
-KBUILD_CFLAGS	+= -pipe -fno-pic -mcpu=cortex-a57
+KBUILD_CFLAGS	+= -pipe -fno-pic -mcpu=cortex-a57 -fno-store-merging
 
 # Cortex-A57 doesn't need 835769/843419 erratum fixes
 # some toolchain enables those fixes automatically, so opt-out
