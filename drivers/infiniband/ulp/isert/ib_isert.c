@@ -869,11 +869,6 @@ isert_disconnected_handler(struct rdma_cm_id *cma_id,
 	struct isert_np *isert_np = cma_id->context;
 	struct isert_conn *isert_conn = cma_id->qp->qp_context;
 
-	if (isert_np->np_cm_id == cma_id)
-		return isert_np_cma_handler(cma_id->context, event);
-
-	isert_conn = cma_id->qp->qp_context;
-
 	mutex_lock(&isert_conn->conn_mutex);
 	isert_conn_terminate(isert_conn);
 	mutex_unlock(&isert_conn->conn_mutex);

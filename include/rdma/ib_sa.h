@@ -137,12 +137,12 @@ struct ib_sa_path_rec {
 	union ib_gid sgid;
 	__be16       dlid;
 	__be16       slid;
-	int          raw_traffic;
+	u8           raw_traffic;
 	/* reserved */
 	__be32       flow_label;
 	u8           hop_limit;
 	u8           traffic_class;
-	int          reversible;
+	u8           reversible;
 	u8           numb_path;
 	__be16       pkey;
 	__be16       qos_class;
@@ -197,7 +197,7 @@ struct ib_sa_mcmember_rec {
 	u8           hop_limit;
 	u8           scope;
 	u8           join_state;
-	int          proxy_join;
+	u8           proxy_join;
 	int	     ifindex;
 	struct net  *net;
 	enum ib_gid_type gid_type;
